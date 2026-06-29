@@ -1,0 +1,12 @@
+{
+  "name": "evm-security-watch-scripts",
+  "version": "1.0.0",
+  "description": "On-chain recon helpers for the EVM Security Watch skill.",
+  "license": "MIT",
+  "bin": {
+    "evm-call": "./call.js"
+  },
+  "dependencies": {
+    "js-sha3": "^0.9.3"
+  }
+}
