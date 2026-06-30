@@ -70,6 +70,36 @@ EVM_RPC=https://mainnet.base.org node call.js storage 0x<addr> 0x0   # read a st
 
 Defaults to Base Sepolia; override the endpoint with `EVM_RPC`.
 
+## Demo — a real watch pass (Ramses V3, a $1B-class CL DEX)
+
+To show the loop works on **real, complex, professionally-audited** code — not just
+toy examples — here is a triage pass over
+[`RamsesExchange/ramses-v3-contracts`](https://github.com/RamsesExchange/ramses-v3-contracts)
+(168 contracts / ~22k LOC; a Uniswap-V3-style concentrated-liquidity ve(3,3) DEX,
+audited by Consensys Diligence **and** Code4rena).
+
+The watch's **collect → confront** step pulled Ramses's disclosure history, including
+the [October 2024 reward-distribution exploit (~$90k)](https://www.quillaudits.com/blog/hack-analysis/ramses-exchange-exploit),
+then re-confronted the current code against it. Honest result — **a single triage
+pass found no new Critical/High** (as expected on twice-audited code), but it:
+
+- **Re-located the exact exploit surface.** The 2024 hack abused reward claiming
+  across `tokenId`s in the CL gauge. The pass walked straight to
+  `GaugeV3._getReward` and confirmed the post-exploit fix is present.
+- **Surfaced a real design observation the fix introduced:** that anti-sybil
+  protection is **config-gated** — `if (address(rewardValidator) != address(0))` —
+  and it leans on `tx.origin` as the sybil signal (fragile for smart-contract
+  wallets / account-abstraction). It's a bolt-on mitigation living *outside* the
+  reward-conservation invariant, not inside it.
+- **Triaged 22k LOC** for risky patterns (`delegatecall`, `assembly`, `unchecked`,
+  `tx.origin`) and cleared the benign ones by reading the source — *a hit is a
+  lead, not a finding.*
+
+The point isn't "we out-audited Consensys in one pass" — it's that the watch
+**mechanically navigates to the highest-risk surface, grounded in that protocol's
+own exploit history**, in minutes. That is what makes it valuable *between* audits,
+run continuously.
+
 ## Try it on an intentionally-vulnerable repo
 
 To validate detection without touching production code, point the command at a
