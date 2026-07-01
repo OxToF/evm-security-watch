@@ -70,10 +70,20 @@ Install `commands/security-watch.md` as a Claude Code slash command and run
 4. **Pull recent advisories** — WebSearch the last 48h of EVM/Solidity/DeFi/L2
    disclosures.
 5. **Emit a dated report** — `RAS` (nothing relevant) or per-finding: technique,
-   surface, `file:line`, estimated severity, proposed fix. Never auto-applies.
+   surface, `file:line`, estimated severity, confidence tier, proposed fix.
+   Never auto-applies.
 
-## Core principle
+## Core principles
 
-**Propose, don't apply.** On production code, this skill flags and proposes — it
-does not push fixes. Human validation gates every change. A grep hit is a *lead*,
-not a finding: every candidate must be confirmed by reading the source.
+- **Propose, don't apply.** On production code, this skill flags and proposes —
+  it does not push fixes. Human validation gates every change.
+- **A hit is a lead, not a finding — and a clean read isn't either.** A grep
+  hit must be confirmed by reading the source before it's a finding. Symmetrically,
+  a passing static-analysis run or a reassuring `eth_call` must be confirmed —
+  who controls the guard, cross-verified against a second RPC — before it's a
+  "no finding." Every conclusion carries a confidence tier tied to its method
+  (`PROVEN` formal verification / `TESTED` fuzzing / `VERIFIED-LIVE` /
+  `VERIFIED-SOURCE` / `INFERRED` / `UNKNOWN`); see
+  [`skill/daily-watch.md` §0](skill/daily-watch.md#0-verification-discipline--a-scientific-process-for-security-claims).
+  No complacent findings — a friendly-sounding conclusion earns its wording or
+  it doesn't ship.

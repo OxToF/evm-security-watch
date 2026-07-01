@@ -2,7 +2,12 @@
 
 > The checklist to re-confront code against, every watch pass. Each row: what to
 > look for, how to detect it (grep / static lead), and the safe pattern. A hit is
-> a **lead, not a finding** — confirm by reading the source.
+> a **lead, not a finding** — confirm by reading the source. The reverse also
+> holds: finding the "safe pattern" present is not a clean bill of health until
+> you've checked *who controls it* and tagged the result with a confidence tier
+> — see [`daily-watch.md` §0](daily-watch.md#0-verification-discipline--a-scientific-process-for-security-claims).
+> A guard that exists but is owned by a bare EOA is not the same claim as a
+> guard that exists and is behind a timelock.
 
 ## 1. Reentrancy
 
