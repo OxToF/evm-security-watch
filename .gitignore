@@ -31,3 +31,7 @@ dist/
 *.swp
 .idea/
 .vscode/
+
+# Scanner / watch runtime output
+scan-out/
+watch-reports/
