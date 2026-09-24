@@ -1,0 +1,9 @@
+.git
+node_modules
+**/node_modules
+skill
+commands
+scripts
+server/data
+server/deliveries
+*.log
