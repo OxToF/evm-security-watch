@@ -58,6 +58,33 @@ evm-security-watch/
 Or point a scheduled agent / cron job at the command with the repo path as
 argument, appending each run to the repo's `SECURITY_WATCH.md` journal.
 
+### Scan a repo (CLI, zero dependencies)
+
+```
+node bin/cli.mjs scan https://github.com/<owner>/<repo> [--out <dir>]
+node bin/cli.mjs collect [--out <dir>]
+```
+
+`scan` writes a dated Markdown + HTML report:
+
+1. **Dependency advisories on the exact pinned versions**, from three sources:
+   npm lockfiles (Hardhat), `soldeer.lock`, and **git submodules** (Foundry's
+   `lib/`), whose version is read from `package.json` at the pinned commit.
+   A submodule is only checked when the npm package of that name is published
+   from the same GitHub repository: `forge-std` on npm, for instance, belongs to
+   another project, and matching on the name alone would report someone else's
+   advisories. Anything that cannot be tied to a published version is listed
+   as **not checked**, never reported as clean.
+   Advisories are then split between the **on-chain surface** (libraries that
+   production `.sol` files import, remappings followed) and the toolchain
+   (Hardhat, ethers, test libraries), which never reaches deployed bytecode.
+2. **Build hygiene**: framework, compiler pinned in config, and production files
+   that no 0.8 compiler can build (no built-in overflow checks).
+3. **Code leads** for the 14 classes, in production code only (`test/`,
+   `script/`, mocks, `*.t.sol`, `*.s.sol` skipped).
+
+Set `GITHUB_TOKEN` to lift GitHub's anonymous rate limit. Tests: `node --test bin/scan.test.mjs`.
+
 ### On-chain recon helper
 
 ```bash
