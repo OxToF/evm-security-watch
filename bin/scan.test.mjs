@@ -96,3 +96,18 @@ test("triage: libraries production imports are on-chain, the rest is toolchain",
   assert.deepEqual(onchain.map((a) => a.id), ["A"]);
   assert.deepEqual(toolchain.map((a) => a.id), ["B", "C"]);
 });
+
+test("verified sources without a manifest: imported libraries are 'not checked', never 'no external library'", async () => {
+  const { runScan } = await import("./scan.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "evm-nomanifest-"));
+  const w = (p, t) => { mkdirSync(join(dir, p, ".."), { recursive: true }); writeFileSync(join(dir, p), t); };
+  w("src/core/Token.sol", `pragma solidity ^0.8.20;\nimport {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";\nimport {Errors} from "src/core/Errors.sol";\n`);
+  w("src/core/Errors.sol", "pragma solidity ^0.8.20;\n");
+  w("lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol", "pragma solidity ^0.8.20;\n");
+  const r = await runScan({ localPath: dir, out: join(dir, "_out"), log: () => {}, fetchImpl: async () => { throw new Error("no network in this test"); } });
+  assert.equal(r.deps.coverage.noExternalImports, false);
+  assert.deepEqual(r.deps.coverage.unresolved.map((u) => u.path), ["@openzeppelin/contracts"]);
+  const md = (await import("node:fs")).readFileSync(r.mdPath, "utf8");
+  assert.match(md, /Not checked/);
+  assert.doesNotMatch(md, /import no external library/);
+});

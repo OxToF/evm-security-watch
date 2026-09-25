@@ -176,6 +176,7 @@ export function productionImports(dir, solFiles, remappings, submodulePaths) {
       if (sub) used.add(sub);
       else if (sold) { used.add(sold[1]); if (SOLDEER_TO_NPM[sold[1]]) used.add(SOLDEER_TO_NPM[sold[1]]); }
       else if (p.startsWith("node_modules/")) used.add(importRoot(p.slice("node_modules/".length)));
+      else if (p.startsWith("lib/")) used.add(p.split("/").slice(0, 2).join("/")); // vendored, no submodule entry
       else used.add(importRoot(p));
     }
   }
