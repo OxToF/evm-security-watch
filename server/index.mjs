@@ -243,6 +243,9 @@ function agentJobView(job) {
 
 const SKILL_MD = existsSync(join(__dirname, "skill.md")) ? readFileSync(join(__dirname, "skill.md"), "utf8") : "";
 
+// Provider RPC URLs carry their API key in the path: log the host only.
+function rpcHost(u) { try { return new URL(u).host; } catch { return "(unparseable RPC URL)"; } }
+
 const server = createServer(async (req, res) => {
   const ip = req.headers["fly-client-ip"] || req.socket.remoteAddress || "?";
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -352,7 +355,7 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
   console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG`);
-  console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${RPC_URL}`);
+  console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${rpcHost(RPC_URL)}`);
 });
 
 export { server };
