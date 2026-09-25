@@ -142,3 +142,18 @@ test("web flow and a misconfigured RPC", async () => {
   chainId = USDG.chainId;
   assert.equal((await post("/pay/verify", { jobId: job.jobId, txHash: tx(3) })).status, 202);
 });
+
+test("the landing is served from the API origin, with the logo and contact filled in", async () => {
+  const res = await fetch(`${base}/`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /text\/html/);
+  const html = await res.text();
+  assert.match(html, /EVM <span class="g">Watchdog<\/span>/);
+  assert.match(html, /<svg/);
+  assert.doesNotMatch(html, /\{\{/);
+  // The page must pay through the ERC-20 transfer selector, never a raw ETH value transfer.
+  assert.match(html, /0xa9059cbb/);
+  const fav = await fetch(`${base}/favicon.svg`);
+  assert.equal(fav.status, 200);
+  assert.match(fav.headers.get("content-type"), /image\/svg\+xml/);
+});
