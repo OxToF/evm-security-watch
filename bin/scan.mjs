@@ -205,7 +205,7 @@ function renderReport(meta, deps, hygiene, source) {
   else for (const a of deps.buckets.toolchain) md.push(advLine(a));
   if (cov.unresolved.length) {
     md.push("", "### 1c. Not checked", "", "These dependencies could not be tied to a published package version, so no advisory was looked up for them. Review them by hand.", "");
-    for (const u of cov.unresolved) md.push(`- \`${u.path}\` (${u.url})${u.sha ? ` @ \`${u.sha.slice(0, 10)}\`` : ""}${u.production ? "" : " (tests/scripts only)"}: ${u.reason}`);
+    for (const u of cov.unresolved) md.push(`- \`${u.path}\`${u.url ? ` (${u.url})` : ""}${u.sha ? ` @ \`${u.sha.slice(0, 10)}\`` : ""}${u.production ? "" : " (tests/scripts only)"}: ${u.reason}`);
   }
   md.push("");
   md.push("## 2. Build hygiene", "");
@@ -390,13 +390,22 @@ export async function runScan(opts = {}) {
   for (const d of subs) if (d.status === "resolved" && used.has(d.path)) onchainNames.add(d.name);
   for (const d of [...npm.pkgs, ...soldeer]) if (used.has(d.name) || (d.soldeerName && used.has(d.soldeerName))) onchainNames.add(d.name);
   depResult.buckets = triageAdvisories(depResult.advisories, onchainNames);
+  // Every external library production code imports, whether or not a manifest
+  // pins it. Roots that are directories of the repo itself ("src/…" imports) are
+  // local code, not dependencies.
+  const matched = new Set([...subs.map((d) => d.path), ...npm.pkgs.map((d) => d.name), ...soldeer.flatMap((d) => [d.name, d.soldeerName])]);
+  const external = [...used].filter((u) => !TEST_ONLY_PACKAGES.has(u) && !(!u.startsWith("lib/") && !u.startsWith("@") && existsSync(join(dir, u))));
+  const unpinned = external.filter((u) => !matched.has(u)).sort().map((u) => ({
+    path: u, url: "", sha: null, production: true,
+    reason: "imported by production code, but no lockfile, submodule or soldeer entry pins its version",
+  }));
   depResult.coverage = {
     checked: new Set(resolved.map((d) => `${d.name}@${d.version}`)).size,
     sources,
-    unresolved: subs.filter((d) => d.status !== "resolved").map((d) => ({ ...d, production: used.has(d.path) })),
+    unresolved: [...subs.filter((d) => d.status !== "resolved").map((d) => ({ ...d, production: used.has(d.path) })), ...unpinned],
     submodules: subs,
     // Nothing to check at all: production code imports no dependency.
-    noExternalImports: !subs.some((d) => used.has(d.path)) && ![...npm.pkgs, ...soldeer].some((d) => used.has(d.name) || (d.soldeerName && used.has(d.soldeerName))),
+    noExternalImports: external.length === 0,
   };
   const hygiene = checkHygiene(dir);
   const source = scanSource(dir);
