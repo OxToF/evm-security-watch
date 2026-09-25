@@ -16,7 +16,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runScan, parseGithubUrl } from "../bin/scan.mjs";
+import { runScan, parseGithubUrl, WATCHDOG_LOGO } from "../bin/scan.mjs";
 import { Store } from "./store.mjs";
 import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
@@ -241,6 +241,15 @@ function agentJobView(job) {
   return view;
 }
 
+// The landing is served from here: same origin as the API, so no CORS and one deploy.
+const LANDING_FILE = join(__dirname, "..", "site", "index.html");
+const LANDING = existsSync(LANDING_FILE)
+  ? readFileSync(LANDING_FILE, "utf8")
+    .replaceAll("{{LOGO}}", WATCHDOG_LOGO.replace('width="46" height="46"', 'width="34" height="34"'))
+    .replaceAll("{{CONTACT}}", SUPPORT || "solanawatchdog@proton.me")
+  : null;
+const FAVICON = WATCHDOG_LOGO.replace('width="46" height="46" ', "");
+
 const SKILL_MD = existsSync(join(__dirname, "skill.md")) ? readFileSync(join(__dirname, "skill.md"), "utf8") : "";
 
 // Provider RPC URLs carry their API key in the path: log the host only.
@@ -253,6 +262,13 @@ const server = createServer(async (req, res) => {
 
   try {
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+
+    if (req.method === "GET" && url.pathname === "/" && LANDING) {
+      return send(res, 200, LANDING, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
+    }
+    if (req.method === "GET" && url.pathname === "/favicon.svg") {
+      return send(res, 200, FAVICON, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+    }
 
     if (req.method === "GET" && (url.pathname === "/skill.md" || url.pathname === "/agent")) {
       return send(res, 200, SKILL_MD

@@ -10,9 +10,10 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Zero runtime deps — just the code the server needs (bin/ + server/).
+# Zero runtime deps — just the code the server needs (bin/ + server/ + the landing).
 COPY bin ./bin
 COPY server ./server
+COPY site ./site
 
 ENV NODE_ENV=production \
     PORT=8080 \

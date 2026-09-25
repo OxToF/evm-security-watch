@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EVM Watchdog</title>
+<meta name="description" content="Security scan for Solidity repos. Advisories on your exact pinned versions, Foundry submodules included, and 14 known bug classes. Pay in USDG on Robinhood Chain.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+:root{--bg:#0b0b16;--card:#171733;--line:#262648;--fg:#eef0ff;--muted:#a2a6c8;--accent:#8b5cf6;--accent2:#22d3a6;--danger:#ff6b6b;--radius:14px}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#1b1b3d 0%,var(--bg) 55%);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+a{color:var(--accent2);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:960px;margin:0 auto;padding:0 16px}
+header{padding:22px 0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.2px}
+.brand .g{color:var(--accent2)}
+.nav a{color:var(--muted);margin-left:18px;font-size:.92rem}
+.hero{padding:48px 0 30px;text-align:center}
+.hero h1{font-size:2.5rem;line-height:1.12;margin:0 0 14px}
+.hero h1 em{font-style:normal;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p.sub{font-size:1.12rem;color:var(--muted);max-width:680px;margin:0 auto 26px}
+.scanbox{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;max-width:560px;margin:0 auto;box-shadow:0 20px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:10px;text-align:left}
+.fld{background:#0e0e20;border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:13px 14px;font-size:1rem;width:100%}
+.fld::placeholder{color:#6b6f96}
+.btn{background:linear-gradient(90deg,var(--accent),#6d4bd6);color:#fff;border:0;border-radius:10px;padding:13px 20px;font-size:1rem;font-weight:700;cursor:pointer;display:inline-block;text-align:center;width:100%}
+.btn:hover{filter:brightness(1.08)}.btn:disabled{opacity:.6;cursor:default}
+.btn.ghost{background:transparent;border:1px solid var(--accent);color:var(--fg)}
+.price{color:var(--muted);font-size:.9rem}.price b{color:var(--fg)}
+.hint{color:var(--muted);font-size:.82rem}
+.msg{font-size:.92rem;word-break:break-word;display:none;border-radius:10px;padding:10px 12px}
+.msg.show{display:block}.msg.err{color:var(--danger);background:#2a1420}.msg.ok{color:var(--accent2);background:#10261f}.msg.info{color:var(--fg);background:#1d1d3c}
+.quote{display:none;background:#0e0e20;border:1px dashed var(--accent);border-radius:10px;padding:12px 14px;font-size:.92rem}
+.quote.show{display:block}.quote b{font-size:1.15rem}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em;word-break:break-all}
+section{padding:40px 0;border-top:1px solid var(--line)}
+h2{font-size:1.5rem;margin:0 0 18px}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.step{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.step .n{color:var(--accent2);font-weight:800;font-size:.85rem;letter-spacing:1px}
+.step h3{margin:.4rem 0 .3rem;font-size:1.05rem}.step p{color:var(--muted);font-size:.92rem;margin:0}
+.offers{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.offer{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;display:flex;flex-direction:column}
+.offer.mark{border-color:var(--accent)}
+.offer .tag{font-size:.78rem;color:var(--accent2);font-weight:700;letter-spacing:1px}
+.offer h3{font-size:1.25rem;margin:.4rem 0}
+.offer .p{font-size:1.7rem;font-weight:800;margin:.2rem 0 .6rem}.offer .p small{font-size:.9rem;color:var(--muted);font-weight:500}
+.offer ul{margin:.4rem 0 16px;padding-left:1.1rem;color:var(--muted)}.offer li{margin:.3rem 0}
+.offer .btn{margin-top:auto}
+.scope{background:#1a1330;border:1px solid #3a2a5c;border-radius:var(--radius);padding:18px 20px;color:#d9cef2;font-size:.95rem}
+.agents{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;color:var(--muted)}
+.agents code{color:var(--fg)}
+footer{padding:34px 0;color:var(--muted);font-size:.9rem;text-align:center}
+@media (max-width:720px){.steps,.offers{grid-template-columns:1fr}.hero h1{font-size:2rem}.nav a{margin:0 14px 0 0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">{{LOGO}}<span>EVM <span class="g">Watchdog</span></span></div>
+    <nav class="nav"><a href="#offers">Offers</a><a href="#agents">For agents</a><a href="https://github.com/OxToF/evm-security-watch">GitHub</a></nav>
+  </header>
+
+  <div class="hero" id="top">
+    <h1>Harden your Solidity <em>before</em> someone else does</h1>
+    <p class="sub">Paste your public repo. We check the libraries you actually deploy against the advisory databases on your exact pinned versions, Foundry submodules included, and your code against 14 known Solidity bug classes. Dated report, severity, file and line.</p>
+
+    <div class="scanbox">
+      <input class="fld" id="repo" type="url" placeholder="https://github.com/your-org/your-repo" autocomplete="off">
+      <input class="fld" id="email" type="email" placeholder="you@example.com" autocomplete="email">
+      <div class="quote" id="quote"></div>
+      <button class="btn" id="pay">Pay with MetaMask & scan</button>
+      <button class="btn ghost" id="resume" style="display:none">Resume my payment check</button>
+      <div class="price">On-demand scan, about <b><span id="price">69</span> USDG</b> on Robinhood Chain. Public GitHub repo. MetaMask, Rabby or any browser wallet.</div>
+      <div class="msg" id="msg" role="status" aria-live="polite"></div>
+      <div class="hint">No install. We only download public code, never your secrets. Gas is paid in ETH on Robinhood Chain.</div>
+    </div>
+  </div>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step"><div class="n">01</div><h3>Paste the repo</h3><p>A public GitHub URL and the email that receives the report.</p></div>
+      <div class="step"><div class="n">02</div><h3>You pay in USDG</h3><p>One transfer on Robinhood Chain. The amount carries a few extra micro-USDG that identify your order.</p></div>
+      <div class="step"><div class="n">03</div><h3>You get the report</h3><p>Checked on-chain, scanned in about a minute, emailed as HTML and Markdown.</p></div>
+    </div>
+  </section>
+
+  <section id="offers">
+    <h2>Two ways to work together</h2>
+    <div class="offers">
+      <div class="offer mark">
+        <div class="tag">ON DEMAND</div>
+        <h3>The scan</h3>
+        <div class="p"><span class="price-n">69</span> USDG <small>per scan</small></div>
+        <ul>
+          <li>Advisories on your exact versions: npm lockfiles, Soldeer and Foundry submodules</li>
+          <li>Split between what you deploy and what only runs in your toolchain</li>
+          <li>Anything we cannot pin is listed as not checked, never as clean</li>
+          <li>Code leads for 14 Solidity bug classes, production code only</li>
+        </ul>
+        <a class="btn" href="#top">Run a scan</a>
+      </div>
+      <div class="offer">
+        <div class="tag">CONTINUOUS</div>
+        <h3>The watch</h3>
+        <div class="p">custom <small>per month</small></div>
+        <ul>
+          <li>Daily monitoring of your dependency tree</li>
+          <li>Human pass on every newly merged commit</li>
+          <li>Deployed contracts checked against their verified source and your docs</li>
+          <li>Alerted the day a flaw lands, not later in a post mortem</li>
+        </ul>
+        <a class="btn ghost" href="mailto:{{CONTACT}}?subject=Continuous%20EVM%20security%20watch">Talk about the watch</a>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="scope"><strong>What this is not.</strong> A full audit is not replaceable. This service detects known vulnerability classes and dependency issues, it does not certify the absence of bugs. It is a first line of defense, not a guarantee.</div>
+  </section>
+
+  <section id="agents">
+    <h2>For AI agents</h2>
+    <div class="agents">Your agent can buy the same scan on its own: an HTTP 402 quote, a USDG transfer, the report as JSON. The manual it reads is at <a href="/skill.md"><code>/skill.md</code></a>.</div>
+  </section>
+
+  <footer>EVM Watchdog. Open source scanner under the MIT license. The scan is a hardening aid, not a certified audit.</footer>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const KEY = "evmw_pending";
+  let cfg = null;
+
+  const show = (text, kind = "info") => { const m = $("msg"); m.className = `msg show ${kind}`; m.innerHTML = text; };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const store = { get() { try { return JSON.parse(localStorage.getItem(KEY) || "null"); } catch { return null; } }, set(v) { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch {} }, clear() { try { localStorage.removeItem(KEY); } catch {} } };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const api = async (path, body) => {
+    const res = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {});
+    let data = {}; try { data = await res.json(); } catch {}
+    return { status: res.status, data };
+  };
+  const word = (hex) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+
+  async function loadConfig() {
+    const { status, data } = await api("/pay/config");
+    if (status !== 200 || !data.payTo) throw new Error("Payments are not available right now.");
+    cfg = data;
+    $("price").textContent = data.priceUsd;
+    document.querySelectorAll(".price-n").forEach((e) => (e.textContent = data.priceUsd));
+  }
+
+  async function ensureChain(eth) {
+    const chainHex = "0x" + cfg.chainId.toString(16);
+    try {
+      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex }] });
+    } catch (e) {
+      if (e && (e.code === 4902 || /Unrecognized chain/i.test(e.message || ""))) {
+        await eth.request({ method: "wallet_addEthereumChain", params: [{
+          chainId: chainHex, chainName: "Robinhood Chain",
+          nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+          rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"], blockExplorerUrls: [cfg.explorer],
+        }] });
+      } else throw e;
+    }
+    const now = await eth.request({ method: "eth_chainId" });
+    if (parseInt(now, 16) !== cfg.chainId) throw new Error("Please switch your wallet to Robinhood Chain.");
+  }
+
+  // Ask the server until it sees the transfer (it also retries on its side).
+  async function verify(jobId, txHash) {
+    for (let i = 0; i < 8; i++) {
+      show(`Checking your payment on Robinhood Chain… <span class="mono">${esc(txHash.slice(0, 12))}…</span>`);
+      const { status, data } = await api("/pay/verify", { jobId, txHash });
+      if (status === 202) return true;
+      if (status === 409 && /already (paid|running|done)/.test(data.error || "")) return true;
+      const retry = status === 402 && /not found|not yet mined|RPC/i.test(data.error || "");
+      if (!retry) throw new Error(data.error || `Payment check failed (${status}).`);
+      await sleep(5000);
+    }
+    throw new Error("Your transaction is not visible yet. Use “Resume my payment check” in a minute; you will not pay twice.");
+  }
+
+  async function follow(jobId) {
+    for (let i = 0; i < 90; i++) {
+      const { data } = await api(`/jobs/${jobId}`);
+      if (data.status === "done") {
+        store.clear();
+        show(`Done. The report for <b>${esc(data.repo.replace(/^https:\/\/github.com\//, "").replace(/\.git$/, ""))}</b> is in your inbox (check spam). Job <span class="mono">${esc(jobId)}</span>.`, "ok");
+        return;
+      }
+      if (data.status === "error") {
+        store.clear();
+        show(`The scan failed: ${esc(data.error || "unknown error")}. Your payment is recorded; write to <a href="mailto:{{CONTACT}}">{{CONTACT}}</a> with job <span class="mono">${esc(jobId)}</span>.`, "err");
+        return;
+      }
+      show(`Payment confirmed. Scanning (${esc(data.status)})… about a minute.`, "ok");
+      await sleep(4000);
+    }
+    show(`Still working. The report will arrive by email. Job <span class="mono">${esc(jobId)}</span>.`, "ok");
+  }
+
+  async function pay() {
+    const btn = $("pay");
+    const repo = $("repo").value.trim(), email = $("email").value.trim();
+    if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/?$/.test(repo)) return show("Paste a public GitHub URL, like https://github.com/owner/repo.", "err");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return show("Enter the email that should receive the report.", "err");
+    const eth = window.ethereum;
+    if (!eth) {
+      const deep = `https://metamask.app.link/dapp/${location.host}${location.pathname}`;
+      return show(`No browser wallet found. Install <a href="https://metamask.io/download/">MetaMask</a>, or on a phone <a href="${deep}">open this page in the MetaMask app</a>.`, "err");
+    }
+    btn.disabled = true;
+    try {
+      if (!cfg) await loadConfig();
+      show("Connecting your wallet…");
+      const [from] = await eth.request({ method: "eth_requestAccounts" });
+      await ensureChain(eth);
+
+      show("Preparing your order…");
+      const q = await api("/scan", { repo, email });
+      if (q.status !== 201) throw new Error(q.data.error || `Could not create the order (${q.status}).`);
+      const { jobId, payment } = q.data;
+      $("quote").className = "quote show";
+      $("quote").innerHTML = `Pay exactly <b>${esc(payment.amount)} USDG</b>. The last digits identify your order.<br><span class="hint">To <span class="mono">${esc(payment.payTo)}</span> · valid until ${esc(new Date(payment.expiresAt).toLocaleString())}</span>`;
+
+      const bal = BigInt(await eth.request({ method: "eth_call", params: [{ to: payment.token, data: "0x70a08231" + word(from) }, "latest"] }));
+      if (bal < BigInt(payment.amountBase)) throw new Error(`This wallet holds ${(Number(bal) / 1e6).toFixed(2)} USDG on Robinhood Chain; the scan needs ${esc(payment.amount)}. Only the official USDG counts (${esc(payment.token)}).`);
+      const gas = BigInt(await eth.request({ method: "eth_getBalance", params: [from, "latest"] }));
+      if (gas === 0n) throw new Error("This wallet has no ETH on Robinhood Chain to pay the network fee.");
+
+      show("Confirm the USDG transfer in your wallet…");
+      const txHash = await eth.request({ method: "eth_sendTransaction", params: [{
+        from, to: payment.token, data: "0xa9059cbb" + word(payment.payTo) + word(BigInt(payment.amountBase).toString(16)),
+      }] });
+      store.set({ jobId, txHash });
+      await verify(jobId, txHash);
+      $("resume").style.display = "none";
+      await follow(jobId);
+    } catch (e) {
+      if (e && e.code === 4001) show("Cancelled in the wallet. Nothing was sent.", "err");
+      else show(esc(e && e.message ? e.message : e), "err");
+      if (store.get()) $("resume").style.display = "block";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function resume() {
+    const p = store.get();
+    if (!p) return;
+    $("resume").disabled = true;
+    try { await verify(p.jobId, p.txHash); $("resume").style.display = "none"; await follow(p.jobId); }
+    catch (e) { show(esc(e.message || e), "err"); }
+    finally { $("resume").disabled = false; }
+  }
+
+  $("pay").addEventListener("click", pay);
+  $("resume").addEventListener("click", resume);
+  if (store.get()) $("resume").style.display = "block";
+  loadConfig().catch((e) => show(esc(e.message), "err"));
+})();
+</script>
+</body>
+</html>
