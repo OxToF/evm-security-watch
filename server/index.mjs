@@ -16,7 +16,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runScan, parseGithubUrl, WATCHDOG_LOGO } from "../bin/scan.mjs";
+import { runScan, parseGithubUrl, WATCHDOG_LOGO, fixMailto } from "../bin/scan.mjs";
 import { Store } from "./store.mjs";
 import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
@@ -37,6 +37,7 @@ const REPORTS_DIR = process.env.REPORTS_DIR || join(dirname(JOBS_FILE), "reports
 const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const EXPLORER = "https://robinhoodchain.blockscout.com";
 const SUPPORT = process.env.SUPPORT_EMAIL || null;
+const CONTACT = SUPPORT || "solanawatchdog@proton.me";
 
 if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Error("MERCHANT_WALLET is not an 0x address");
 
@@ -107,16 +108,21 @@ async function runJob(jobId) {
   let result = null;
   try {
     const out = mkdtempSync(join(tmpdir(), "evmw-job-"));
-    result = await runScan({ repoUrl: job.repo, out, log: () => {} });
+    const cta = { contact: CONTACT, ref: jobId };
+    result = await runScan({ repoUrl: job.repo, out, log: () => {}, cta });
     const html = readFileSync(result.htmlPath, "utf8");
     const md = readFileSync(result.mdPath, "utf8");
     const sum = summarize(result);
-    if (job.agent) {
-      mkdirSync(REPORTS_DIR, { recursive: true });
-      writeFileSync(join(REPORTS_DIR, `${jobId}.html`), html);
-      writeFileSync(join(REPORTS_DIR, `${jobId}.md`), md);
-      writeFileSync(join(REPORTS_DIR, `${jobId}.json`), JSON.stringify(sum, null, 2) + "\n");
-    }
+    // Every report is kept, so the email can link to it: mail clients show an
+    // attached .html as source code, not as the branded page.
+    mkdirSync(REPORTS_DIR, { recursive: true });
+    writeFileSync(join(REPORTS_DIR, `${jobId}.html`), html);
+    writeFileSync(join(REPORTS_DIR, `${jobId}.md`), md);
+    writeFileSync(join(REPORTS_DIR, `${jobId}.json`), JSON.stringify(sum, null, 2) + "\n");
+    const viewToken = randomBytes(24).toString("base64url");
+    store.update(jobId, { viewTokenHash: hashToken(viewToken) });
+    const viewUrl = `${PUBLIC_BASE}/r/${jobId}/${viewToken}`;
+    const fixUrl = fixMailto(cta, result.meta, `Fix request: ${sum.repo}`, [`On-chain advisories: ${sum.counts.onchainAdvisories}`, `Code leads: ${sum.counts.codeLeads}`]);
     const c = sum.counts;
     const headline = sum.noExternalImports
       ? "Your production contracts import no external library."
@@ -127,7 +133,7 @@ async function runJob(jobId) {
     if (job.email) await sendReport({
       to: job.email,
       subject: `Your EVM security scan — ${sum.repo}`,
-      text: `Scan complete for ${job.repo}.\n\n${headline}\n${c.toolchainAdvisories} more in toolchain/test packages, ${c.dependenciesNotChecked} dependencies not checked, ${c.codeLeads} code leads.\n\n${top}\n\nFull report attached. A scan, not an audit.`,
+      text: `Scan complete for ${job.repo}.\n\n${headline}\n${c.toolchainAdvisories} more in toolchain/test packages, ${c.dependenciesNotChecked} dependencies not checked, ${c.codeLeads} code leads.\n\n${top}\n\nView your report: ${viewUrl}\nWant the findings fixed? Write to ${CONTACT} with reference ${jobId}.\n\nThe report is also attached. A scan, not an audit.`,
       html: `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:560px;margin:auto;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #eaecf3">
 <div style="background:#160b2e;padding:18px 22px;border-bottom:3px solid #14F195">
 <span style="color:#fff;font-weight:800;letter-spacing:.5px;font-size:16px">EVM <span style="color:#14F195">WATCHDOG</span></span>
@@ -136,7 +142,11 @@ async function runJob(jobId) {
 <p style="margin:0 0 12px;font-size:15px;color:#1c2030">Scan complete for <b>${sum.repo}</b>.</p>
 <p style="margin:0 0 14px;color:#1c2030">${headline}<br><b>${c.toolchainAdvisories}</b> in toolchain / test packages &middot; <b>${c.dependenciesNotChecked}</b> dependencies not checked &middot; <b>${c.codeLeads}</b> code leads</p>
 ${top ? `<div style="background:#f7f8fc;border:1px solid #eaecf3;border-radius:10px;padding:12px 14px;font-size:13px;color:#333;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace">${top.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>` : ""}
-<p style="margin:16px 0 0;color:#1c2030">The full report is attached &mdash; open the <b>.html</b> for the branded version.</p>
+<table role="presentation" cellspacing="0" cellpadding="0" style="margin:18px 0 0"><tr>
+<td style="padding:0 8px 8px 0"><a href="${viewUrl}" style="display:inline-block;background:#6d3bd6;color:#ffffff;font-weight:700;text-decoration:none;border-radius:10px;padding:12px 18px">View your report</a></td>
+<td style="padding:0 0 8px 0"><a href="${fixUrl}" style="display:inline-block;background:#ffffff;color:#6d3bd6;font-weight:700;text-decoration:none;border-radius:10px;padding:11px 17px;border:1px solid #6d3bd6">Get the findings fixed</a></td>
+</tr></table>
+<p style="margin:10px 0 0;color:#5b6178;font-size:13px">The link is private to you. The report is also attached (open the <b>.html</b> in a browser).</p>
 <p style="margin:14px 0 0;color:#8189a3;font-size:12px">A hygiene + known-class scan, not an audit. It does not certify the absence of bugs.</p></div></div>`,
       attachments: [
         { filename: `${result.meta.owner}-${result.meta.repo}-scan.html`, content: Buffer.from(html).toString("base64") },
@@ -246,7 +256,7 @@ const LANDING_FILE = join(__dirname, "..", "site", "index.html");
 const LANDING = existsSync(LANDING_FILE)
   ? readFileSync(LANDING_FILE, "utf8")
     .replaceAll("{{LOGO}}", WATCHDOG_LOGO.replace('width="46" height="46"', 'width="34" height="34"'))
-    .replaceAll("{{CONTACT}}", SUPPORT || "solanawatchdog@proton.me")
+    .replaceAll("{{CONTACT}}", CONTACT)
   : null;
 const FAVICON = WATCHDOG_LOGO.replace('width="46" height="46" ', "");
 
@@ -265,6 +275,18 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/" && LANDING) {
       return send(res, 200, LANDING, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
+    }
+    // The private report link from the email: /r/<jobId>/<token>
+    if (req.method === "GET" && url.pathname.startsWith("/r/")) {
+      const m = /^\/r\/([0-9a-f-]{36})\/([A-Za-z0-9_-]{20,64})$/.exec(url.pathname);
+      const job = m && store.get(m[1]);
+      const ok = job && job.viewTokenHash && (() => {
+        const a = Buffer.from(hashToken(m[2]), "hex"), b = Buffer.from(job.viewTokenHash, "hex");
+        return a.length === b.length && timingSafeEqual(a, b);
+      })();
+      const f = ok && join(REPORTS_DIR, `${job.id}.html`);
+      if (!ok || !existsSync(f)) return send(res, 404, "Report not found. Check the link in your email.");
+      return send(res, 200, readFileSync(f, "utf8"), { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex, nofollow", "referrer-policy": "no-referrer", "cache-control": "private, no-store" });
     }
     if (req.method === "GET" && url.pathname === "/favicon.svg") {
       return send(res, 200, FAVICON, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
@@ -353,7 +375,7 @@ const server = createServer(async (req, res) => {
       const job = store.get(url.pathname.split("/")[2]);
       if (!job) return send(res, 404, { error: "unknown jobId" });
       // never leak the email or an agent job's token hash on a public endpoint
-      const { email, accessTokenHash, ...safe } = job;
+      const { email, accessTokenHash, viewTokenHash, ...safe } = job;
       return send(res, 200, safe);
     }
 
