@@ -111,3 +111,14 @@ test("verified sources without a manifest: imported libraries are 'not checked',
   assert.match(md, /Not checked/);
   assert.doesNotMatch(md, /import no external library/);
 });
+
+test("fix links appear only when a contact is given, pre-filled with the repo and reference", async () => {
+  const { fixMailto } = await import("./scan.mjs");
+  const meta = { owner: "acme", repo: "vault" };
+  assert.equal(fixMailto(null, meta, "x"), null);
+  assert.equal(fixMailto({ contact: null }, meta, "x"), null);
+  const l = decodeURIComponent(fixMailto({ contact: "ops@example.com", ref: "job-1" }, meta, "Fix request: acme/vault: GHSA-1", ["Advisory: GHSA-1"]));
+  assert.match(l, /^mailto:ops@example\.com\?subject=Fix request: acme\/vault: GHSA-1&body=/);
+  assert.match(l, /Repository: https:\/\/github\.com\/acme\/vault/);
+  assert.match(l, /Scan reference: job-1/);
+});

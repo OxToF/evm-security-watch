@@ -157,3 +157,12 @@ test("the landing is served from the API origin, with the logo and contact fille
   assert.equal(fav.status, 200);
   assert.match(fav.headers.get("content-type"), /image\/svg\+xml/);
 });
+
+test("private report links: a wrong token or an unknown job is a 404, never a report", async () => {
+  const job = await (await post("/scan", { repo: "https://github.com/morpho-org/morpho-blue", email: "a@b.co" })).json();
+  assert.equal((await fetch(`${base}/r/${job.jobId}/${"x".repeat(32)}`)).status, 404); // not scanned yet, no token
+  assert.equal((await fetch(`${base}/r/00000000-0000-0000-0000-000000000000/${"x".repeat(32)}`)).status, 404);
+  assert.equal((await fetch(`${base}/r/not-a-uuid/short`)).status, 404);
+  const pub = await (await fetch(`${base}/jobs/${job.jobId}`)).json();
+  assert.equal("viewTokenHash" in pub, false);
+});
