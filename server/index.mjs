@@ -7,6 +7,10 @@
 //             POST /agent/scan {jobId,txHash} -> same check, then the agent polls
 //             GET /agent/jobs/:id with the bearer token it got at quote time.
 //
+// x402 rail:  the same 402 carries a PAYMENT-REQUIRED header for USDC on Base.
+//             A standard x402 client resends with PAYMENT-SIGNATURE; a facilitator
+//             settles it and the paid answer is the job (see settleX402).
+//
 // A quote's amount is unique among open quotes: EVM transfers carry no memo, so the
 // amount is what ties a public payment to one job (see verify.mjs).
 // Zero runtime deps: Node http + fetch only.
@@ -21,6 +25,7 @@ import { Store } from "./store.mjs";
 import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
 import { verifyUsdgPayment, USDG, toBase, formatUnits } from "./verify.mjs";
+import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaarExtension } from "./x402.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -36,12 +41,16 @@ const JOBS_FILE = process.env.JOBS_FILE || join(__dirname, "data", "jobs.json");
 const REPORTS_DIR = process.env.REPORTS_DIR || join(dirname(JOBS_FILE), "reports");
 const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const EXPLORER = "https://robinhoodchain.blockscout.com";
+// x402 on Base. "off" leaves only the USDG rail.
+const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://facilitator.payai.network";
+const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const SUPPORT = process.env.SUPPORT_EMAIL || null;
 const CONTACT = SUPPORT || "solanawatchdog@proton.me";
 
 if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Error("MERCHANT_WALLET is not an 0x address");
 
 const store = new Store(JOBS_FILE);
+const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL });
 const queue = new Queue();
 
 // --- tiny per-IP rate limit (protects the quote endpoints) ---
@@ -60,7 +69,8 @@ function send(res, code, body, extraHeaders = {}) {
     "content-type": typeof body === "string" ? "text/plain" : "application/json",
     "access-control-allow-origin": ALLOW_ORIGIN,
     "access-control-allow-methods": "POST, GET, OPTIONS",
-    "access-control-allow-headers": "content-type, authorization",
+    "access-control-allow-headers": "content-type, authorization, payment-signature",
+    "access-control-expose-headers": "payment-required, payment-response",
     ...extraHeaders,
   });
   res.end(payload);
@@ -232,9 +242,109 @@ function paymentRequired(job, accessToken) {
     jobId: job.id,
     accessToken,
     payment: t,
+    x402: facilitator
+      ? `Standard x402 v2 clients: pay ${PRICE_USD} USDC on Base instead, requirements in the PAYMENT-REQUIRED header. Resend this same request with a PAYMENT-SIGNATURE header; the facilitator pays the gas. A new job and its access token come back in the paid response.`
+      : undefined,
     howToPay: `${t.note} Then POST ${PUBLIC_BASE}/agent/scan with {"jobId":"${job.id}","txHash":"0x…"}. Keep accessToken: it is shown once and is the only way to read the report.`,
     manual: `${PUBLIC_BASE}/skill.md`,
   };
+}
+
+// --- x402 v2 on Base ------------------------------------------------------------
+
+// Our terms, rebuilt on every call: the copy a client echoes back in `accepted`
+// is never what we settle against, so it cannot lower the amount or redirect it.
+function baseRequirements() {
+  return {
+    scheme: "exact",
+    network: BASE_MAINNET,
+    amount: toBase(PRICE_USD).toString(),
+    asset: BASE_USDC.address,
+    payTo: MERCHANT_WALLET,
+    maxTimeoutSeconds: 300,
+    extra: { name: BASE_USDC.name, version: BASE_USDC.version },
+  };
+}
+
+function x402Required(error = "PAYMENT-SIGNATURE header is required") {
+  return {
+    x402Version: 2,
+    error,
+    resource: {
+      url: `${PUBLIC_BASE}/agent/scan`,
+      description: "EVM Watchdog: npm/Foundry dependency advisories split by on-chain vs toolchain surface, plus known Solidity bug-class leads, for a public GitHub repo. A scan, not an audit.",
+      mimeType: "application/json",
+      serviceName: "EVM Watchdog",
+      tags: ["security", "solidity", "evm", "dependencies", "code-scan"],
+    },
+    accepts: [baseRequirements()],
+    extensions: { bazaar: bazaarExtension({ exampleRepo: "https://github.com/morpho-org/morpho-blue", base: PUBLIC_BASE }) },
+  };
+}
+const quoteHeaders = (error) => (facilitator ? { "payment-required": encodeHeader(x402Required(error)) } : {});
+
+// An EIP-3009 authorization can be settled once on-chain, but two copies racing
+// through /verify could both look valid: the first one in holds the signature.
+const settling = new Set();
+
+async function settleX402(res, payload, body) {
+  const acc = payload.accepted || {};
+  if (acc.network !== BASE_MAINNET || acc.scheme !== "exact")
+    return send(res, 402, { error: `this endpoint settles x402 "exact" on ${BASE_MAINNET} only` }, quoteHeaders());
+  let repoInfo;
+  try { repoInfo = parseGithubUrl(body.repo || ""); } catch (e) { return send(res, 400, { error: e.message }); }
+  if (body.email && !validEmail(body.email)) return send(res, 400, { error: "email is optional, but this one is not valid" });
+  const sig = String((payload.payload && payload.payload.signature) || "").toLowerCase();
+  if (!sig) return send(res, 400, { error: "PAYMENT-SIGNATURE carries no signature" });
+  if (settling.has(sig) || store.list((j) => j.authSig === sig).length) return send(res, 409, { error: "payment already used" });
+  settling.add(sig);
+  try {
+    const reqs = baseRequirements();
+    let v;
+    try { v = await facilitator.verify(payload, reqs); }
+    catch (e) { return send(res, 502, { error: `facilitator unreachable: ${e.message}` }); }
+    if (!v.isValid) {
+      const error = `payment not valid: ${v.invalidReason || "rejected by facilitator"}`;
+      return send(res, 402, { error }, quoteHeaders(error));
+    }
+    let s;
+    try { s = await facilitator.settle(payload, reqs); }
+    catch (e) {
+      // Unknown outcome: the transfer may have landed. Keep the signature so a
+      // retry cannot pay twice; support can match it from the admin list.
+      store.create({ repo: repoInfo.url, email: body.email || null, agent: true, status: "settle_unknown", authSig: sig, via: "x402", network: "base", error: String(e.message).slice(0, 300) });
+      return send(res, 502, { error: "settlement outcome unknown, do not pay again", contact: CONTACT });
+    }
+    if (!s.success || !s.transaction) {
+      const error = `settlement failed: ${s.errorReason || "unknown"}`;
+      return send(res, 402, { error }, { ...quoteHeaders(error), "payment-response": encodeHeader(s) });
+    }
+    const h = String(s.transaction).toLowerCase();
+    // Trust the chain, not the facilitator's word: the same receipt check as USDG.
+    const chain = await verifyUsdgPayment({
+      txHash: h, amount: reqs.amount, merchant: MERCHANT_WALLET, rpcUrl: BASE_RPC_URL,
+      token: BASE_USDC.address, symbol: BASE_USDC.symbol, chainId: BASE_USDC.chainId,
+    });
+    if (!chain.ok || store.findByPayment(h)) {
+      store.create({ repo: repoInfo.url, email: body.email || null, agent: true, status: "settle_unknown", authSig: sig, paymentTx: h, via: "x402", network: "base", error: `facilitator settled but chain check failed: ${chain.reason || "tx reused"}` });
+      return send(res, 502, { error: "payment reported settled but not confirmed on-chain yet, do not pay again", transaction: h, contact: CONTACT });
+    }
+    const accessToken = randomBytes(24).toString("base64url");
+    const job = store.create({
+      repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken),
+      priceUsd: PRICE_USD, amountBase: reqs.amount, status: "paid", paidAt: new Date().toISOString(),
+      paymentTx: h, payer: chain.from, authSig: sig, via: "x402", network: "base",
+    });
+    queue.enqueue(() => runJob(job.id));
+    return send(res, 200, {
+      jobId: job.id, status: "paid", repo: job.repo, accessToken,
+      statusUrl: `${PUBLIC_BASE}/agent/jobs/${job.id}`,
+      poll: "GET statusUrl with Authorization: Bearer <accessToken> every 15s; a scan takes about a minute. accessToken is shown once.",
+      tx: `https://basescan.org/tx/${h}`,
+    }, { "payment-response": encodeHeader(s) });
+  } finally {
+    settling.delete(sig);
+  }
 }
 
 function agentJobView(job) {
@@ -330,6 +440,16 @@ const server = createServer(async (req, res) => {
       if (!MERCHANT_WALLET) return send(res, 503, { error: "payments not configured" });
       if (rateLimited(ip)) return send(res, 429, { error: "rate limited" });
       const body = await readBody(req);
+      // x402 v2: the same request resent with a signed USDC authorization on Base.
+      if (req.headers["payment-signature"]) {
+        if (!facilitator) return send(res, 400, { error: "x402 settlement is off here; use the USDG flow in /skill.md" });
+        const payload = decodeHeader(req.headers["payment-signature"]);
+        if (!payload || payload.x402Version !== 2 || !payload.payload || !payload.accepted)
+          return send(res, 400, { error: "PAYMENT-SIGNATURE is not a base64 x402 v2 PaymentPayload" });
+        return settleX402(res, payload, body);
+      }
+      if (req.headers["x-payment"])
+        return send(res, 400, { error: "x402 v1 X-PAYMENT is not accepted: use x402 v2 (PAYMENT-SIGNATURE, requirements in the PAYMENT-REQUIRED header) or the USDG flow in /skill.md" });
       if (body.jobId || body.txHash) {
         const job = store.get(body.jobId);
         if (!job || !job.agent) return send(res, 404, { error: "unknown jobId" });
@@ -342,7 +462,7 @@ const server = createServer(async (req, res) => {
       if (body.email && !validEmail(body.email)) return send(res, 400, { error: "email is optional, but this one is not valid" });
       const accessToken = randomBytes(24).toString("base64url");
       const job = createQuote({ repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken) });
-      return send(res, 402, paymentRequired(job, accessToken));
+      return send(res, 402, paymentRequired(job, accessToken), quoteHeaders());
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/agent/jobs/")) {
@@ -394,6 +514,7 @@ server.listen(PORT, () => {
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
   console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG`);
   console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${rpcHost(RPC_URL)}`);
+  console.log(`[server] x402 ${facilitator ? `USDC on Base via ${rpcHost(FACILITATOR_URL)} · base rpc ${rpcHost(BASE_RPC_URL)}` : "OFF"}`);
 });
 
 export { server };

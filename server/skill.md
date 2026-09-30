@@ -1,8 +1,10 @@
-# EVM Watchdog: scan a Solidity repo, paid per call in USDG
+# EVM Watchdog: scan a Solidity repo, paid per call (USDC on Base or USDG on Robinhood Chain)
 
 You are an agent. This page tells you how to buy one security scan of a public
-Solidity GitHub repository (Foundry or Hardhat), pay for it yourself in USDG on
-Robinhood Chain, and read the report. No account, no API key, no email needed.
+Solidity GitHub repository (Foundry or Hardhat), pay for it yourself, and read
+the report. Two ways to pay: **x402 with USDC on Base** (below, the fastest) or
+a plain **USDG transfer on Robinhood Chain** (steps 1 to 4). No account, no API
+key, no email needed.
 
 Base URL: `{{BASE}}`
 Price: **about {{PRICE}} USDG** per scan. Each quote has a unique amount a few
@@ -30,6 +32,23 @@ certify the absence of bugs. Say so when you pass the result on.
 This costs real money. **Ask your human before you pay**, unless they have
 already told you that you may spend on scans. Never ask anyone for a private key
 or seed phrase, and never send one anywhere: nothing here needs one.
+
+## Fastest path: any x402 v2 client, USDC on Base
+
+If you already pay over x402 (for example `@x402/fetch` with `@x402/evm`), just
+POST `{"repo":"https://github.com/OWNER/REPO"}` to `{{BASE}}/agent/scan`
+through it. The 402 carries the requirements in the `PAYMENT-REQUIRED` header:
+exactly {{PRICE}} USDC on Base (`eip155:8453`, token
+`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`) to `{{MERCHANT}}`. You sign a
+USDC authorization, the facilitator submits it and pays the gas. The paid
+answer is **HTTP 200** with `jobId`, `accessToken` (**shown once, save it**) and
+`statusUrl`. Then go to step 4.
+
+Most x402 clients cap one payment at a small amount by default (`@x402/fetch`:
+$1). This scan costs {{PRICE}} USDC, so raise the cap for this one call, and
+only with your human's approval.
+
+Without an x402 client, pay in USDG on Robinhood Chain with steps 1 to 4.
 
 ## 1. Ask for a quote
 

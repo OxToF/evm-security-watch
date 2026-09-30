@@ -24,17 +24,17 @@ const lc = (s) => String(s || "").toLowerCase();
 const topicAddress = (t) => "0x" + lc(t).slice(-40);
 
 // Pure check on a receipt + its block, exported for tests (no network).
-export function verifyFromReceipt(receipt, block, { amount, merchant, token = USDG.address, notBefore = 0 }) {
+export function verifyFromReceipt(receipt, block, { amount, merchant, token = USDG.address, symbol = USDG.symbol, notBefore = 0 }) {
   if (!receipt) return { ok: false, reason: "transaction not found or not yet mined" };
   if (receipt.status !== "0x1") return { ok: false, reason: "transaction reverted" };
   const want = BigInt(amount);
   const transfers = (receipt.logs || []).filter((l) =>
     !l.removed && lc(l.address) === lc(token) && l.topics && l.topics.length === 3 &&
     lc(l.topics[0]) === TRANSFER_TOPIC && topicAddress(l.topics[2]) === lc(merchant));
-  if (!transfers.length) return { ok: false, reason: "no USDG transfer to the merchant in this transaction" };
+  if (!transfers.length) return { ok: false, reason: `no ${symbol} transfer to the merchant in this transaction` };
   const values = transfers.map((l) => BigInt(l.data));
   if (!values.includes(want)) {
-    return { ok: false, reason: `USDG sent to the merchant (${values.join(", ")} base units) does not equal the quoted amount (${want}); each quote has a unique amount` };
+    return { ok: false, reason: `${symbol} sent to the merchant (${values.join(", ")} base units) does not equal the quoted amount (${want}); each quote has a unique amount` };
   }
   if (notBefore) {
     const ts = block && block.timestamp ? Number(BigInt(block.timestamp)) * 1000 : 0;
@@ -60,7 +60,7 @@ async function rpc(url, method, params, fetchImpl) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function verifyUsdgPayment({
-  txHash, amount, merchant, rpcUrl, notBefore = 0, token = USDG.address, chainId = USDG.chainId,
+  txHash, amount, merchant, rpcUrl, notBefore = 0, token = USDG.address, symbol = USDG.symbol, chainId = USDG.chainId,
   fetchImpl = globalThis.fetch, retries = 10, delayMs = 3000,
 }) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(txHash || "")) return { ok: false, reason: "invalid transaction hash" };
@@ -86,7 +86,7 @@ export async function verifyUsdgPayment({
     try { block = await rpc(rpcUrl, "eth_getBlockByNumber", [receipt.blockNumber, false], fetchImpl); }
     catch (e) { return { ok: false, reason: `RPC lookup failed: ${e.message}` }; }
   }
-  return verifyFromReceipt(receipt, block, { amount, merchant, token, notBefore });
+  return verifyFromReceipt(receipt, block, { amount, merchant, token, symbol, notBefore });
 }
 
 // Base units <-> display, without floats.
