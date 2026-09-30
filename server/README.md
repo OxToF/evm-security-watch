@@ -53,6 +53,7 @@ already credited is refused.
 | `EVM_RPC_URL` | Robinhood Chain RPC (default: the public one, rate-limited; use a provider in prod) |
 | `FACILITATOR_URL` | x402 v2 facilitator for USDC on Base (default `https://facilitator.payai.network`, free tier, no key; `off` keeps only USDG) |
 | `BASE_RPC_URL` | Base RPC used to re-check each x402 settlement on-chain (default `https://mainnet.base.org`; a provider in prod) |
+| `ERC8004_AGENT_ID` | agentId minted by the ERC-8004 IdentityRegistry on Base; listed in `/.well-known/agent-registration.json` |
 | `SCAN_PRICE_USD` | base price in USDG (default 69) |
 | `QUOTE_TTL_HOURS` | quote lifetime (default 24) |
 | `PUBLIC_BASE_URL` | absolute base for agent-facing URLs and `/skill.md` |

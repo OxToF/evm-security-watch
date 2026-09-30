@@ -51,6 +51,9 @@ if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Erro
 
 const store = new Store(JOBS_FILE);
 const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL });
+// ERC-8004 identity, once registered on Base: the agentId minted by register().
+const ERC8004_REGISTRY = "eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432";
+const ERC8004_AGENT_ID = process.env.ERC8004_AGENT_ID ? Number(process.env.ERC8004_AGENT_ID) : null;
 const queue = new Queue();
 
 // --- tiny per-IP rate limit (protects the quote endpoints) ---
@@ -370,6 +373,26 @@ const LANDING = existsSync(LANDING_FILE)
   : null;
 const FAVICON = WATCHDOG_LOGO.replace('width="46" height="46" ', "");
 
+// The ERC-8004 registration file: the agentURI the on-chain identity points to.
+// Served from the API's own domain, it also proves control of that endpoint.
+function agentRegistration() {
+  return {
+    type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    name: "EVM Watchdog",
+    description: "Security scan of a public Solidity GitHub repo (Foundry or Hardhat): advisories on the exact pinned versions of npm, soldeer and git-submodule dependencies, split into the on-chain surface and the toolchain, unresolved dependencies listed as not checked, and leads for 14 known Solidity bug classes with file:line. JSON + Markdown + HTML report. Agents pay per call over x402 (USDC on Base). A scan, not an audit.",
+    image: `${PUBLIC_BASE}/favicon.svg`,
+    services: [
+      { name: "web", endpoint: `${PUBLIC_BASE}/` },
+      { name: "x402", endpoint: `${PUBLIC_BASE}/agent/scan` },
+      { name: "agent-manual", endpoint: `${PUBLIC_BASE}/skill.md` },
+    ],
+    x402Support: Boolean(facilitator),
+    active: true,
+    registrations: ERC8004_AGENT_ID === null ? [] : [{ agentId: ERC8004_AGENT_ID, agentRegistry: ERC8004_REGISTRY }],
+    supportedTrust: ["reputation"],
+  };
+}
+
 const SKILL_MD = existsSync(join(__dirname, "skill.md")) ? readFileSync(join(__dirname, "skill.md"), "utf8") : "";
 
 // Provider RPC URLs carry their API key in the path: log the host only.
@@ -400,6 +423,10 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/favicon.svg") {
       return send(res, 200, FAVICON, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+    }
+
+    if (req.method === "GET" && url.pathname === "/.well-known/agent-registration.json") {
+      return send(res, 200, agentRegistration(), { "cache-control": "public, max-age=300" });
     }
 
     if (req.method === "GET" && (url.pathname === "/skill.md" || url.pathname === "/agent")) {
