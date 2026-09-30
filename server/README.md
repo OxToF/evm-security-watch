@@ -13,6 +13,8 @@ Agent  POST /agent/scan {repo[,email]}    -> 402, x402-style `accepts`, accessTo
        POST /agent/scan {jobId,txHash}    -> on-chain check -> scan
        GET  /agent/jobs/:id[/report.{json,md,html}]   (Bearer accessToken)
        POST /agent/scan {repo} + PAYMENT-SIGNATURE -> x402 v2, USDC on Base, 200 + job
+       POST /agent/check {packages} + PAYMENT-SIGNATURE -> x402 v2, instant advisories for up to
+                                          100 npm packages; settled only once the answer exists
        GET  /skill.md                     -> the manual an agent reads
 Other  GET /pay/config · GET /jobs/:id · GET /health
 Admin  POST /confirm {jobId} · GET /admin/jobs   (Bearer ADMIN_TOKEN)
@@ -54,7 +56,10 @@ already credited is refused.
 | `FACILITATOR_URL` | x402 v2 facilitator for USDC on Base (default `https://facilitator.payai.network`, free tier, no key; `off` keeps only USDG) |
 | `BASE_RPC_URL` | Base RPC used to re-check each x402 settlement on-chain (default `https://mainnet.base.org`; a provider in prod) |
 | `ERC8004_AGENT_ID` | agentId minted by the ERC-8004 IdentityRegistry on Base; listed in `/.well-known/agent-registration.json` |
-| `SCAN_PRICE_USD` | base price in USDG (default 69) |
+| `SCAN_PRICE_USD` | web price in USDG, a human with a branded report by email (default 69) |
+| `AGENT_SCAN_PRICE_USD` | agent price of `/agent/scan`, both rails (default 0.5) |
+| `CHECK_PRICE_USD` | price of one `/agent/check` request, x402 on Base (default 0.01) |
+| `OSV_QUERY_URL` | advisory database endpoint (default OSV; tests point it at a fake) |
 | `QUOTE_TTL_HOURS` | quote lifetime (default 24) |
 | `PUBLIC_BASE_URL` | absolute base for agent-facing URLs and `/skill.md` |
 | `ADMIN_TOKEN` | bearer for `/confirm` and `/admin/jobs` |

@@ -53,7 +53,8 @@ test("amounts: base units without floats, and no two open quotes share one", () 
 });
 
 // --- end to end ---------------------------------------------------------------
-let rpc, baseRpc, fac, srv, base;
+let rpc, baseRpc, fac, osv, srv, base, osvDown = false;
+const osvCalls = [];
 const facCalls = [];
 const X402_TX = "0x" + "b".repeat(64);
 const receipts = new Map();
@@ -81,7 +82,7 @@ before(async () => {
     req.on("end", () => {
       const { method, params } = JSON.parse(b);
       const result = method === "eth_chainId" ? "0x2105"
-        : method === "eth_getTransactionReceipt" && params[0] === X402_TX ? receipt({ amount: 69_000_000, token: BASE_USDC.address })
+        : method === "eth_getTransactionReceipt" && params[0] === X402_TX ? receipt({ amount: 500_000, token: BASE_USDC.address })
         : null;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
@@ -98,12 +99,26 @@ before(async () => {
       const sig = body.paymentPayload.payload.signature;
       res.writeHead(200, { "content-type": "application/json" });
       if (req.url === "/verify") return res.end(JSON.stringify(sig === "0xbad" ? { isValid: false, invalidReason: "invalid_exact_evm_payload_signature" } : { isValid: true, payer: PAYER }));
+      const settled = { "0xchk1": "0x" + "c".repeat(64), "0xchk2": "0x" + "d".repeat(64) }[sig] || X402_TX;
       res.end(JSON.stringify(sig === "0xnosettle"
         ? { success: false, errorReason: "insufficient_funds", transaction: "", network: BASE_MAINNET }
-        : { success: true, transaction: X402_TX, network: BASE_MAINNET, payer: PAYER }));
+        : { success: true, transaction: settled, network: BASE_MAINNET, payer: PAYER }));
     });
   });
   await new Promise((r) => fac.listen(0, r));
+  // Fake OSV: @openzeppelin/contracts 4.8.0 carries one advisory, everything else is clean.
+  osv = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      const q = JSON.parse(b);
+      osvCalls.push(q);
+      if (osvDown) { res.writeHead(500); return res.end(); }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(q.package.name === "@openzeppelin/contracts" ? { vulns: [{ id: "GHSA-93hq-5wgc-jc82", aliases: ["CVE-2023-30542"], summary: "GovernorCompatibilityBravo may trim proposal calldata" }] } : {}));
+    });
+  });
+  await new Promise((r) => osv.listen(0, r));
   base = `http://127.0.0.1:${port}`;
   srv = spawn(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "index.mjs")], {
     env: {
@@ -111,6 +126,7 @@ before(async () => {
       MERCHANT_WALLET: MERCHANT, EVM_RPC_URL: `http://127.0.0.1:${rpc.address().port}`, SCAN_PRICE_USD: "69",
       PUBLIC_BASE_URL: base, RESEND_API_KEY: "",
       BASE_RPC_URL: `http://127.0.0.1:${baseRpc.address().port}`, FACILITATOR_URL: `http://127.0.0.1:${fac.address().port}`,
+      OSV_QUERY_URL: `http://127.0.0.1:${osv.address().port}`,
     },
     stdio: "ignore",
   });
@@ -120,7 +136,7 @@ before(async () => {
   }
   throw new Error("server did not start");
 });
-after(() => { srv?.kill(); rpc?.close(); baseRpc?.close(); fac?.close(); });
+after(() => { srv?.kill(); rpc?.close(); baseRpc?.close(); fac?.close(); osv?.close(); });
 
 const post = (path, body) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const tx = (n) => "0x" + String(n).repeat(64).slice(0, 64);
@@ -138,10 +154,11 @@ test("agent flow: 402 quote, wrong amount refused, exact amount accepted, token-
   assert.equal(quote.accepts[0].payTo, MERCHANT);
   assert.equal(quote.accepts[0].extra.chainId, 4663);
   assert.equal(quote.payment.amountBase, quote.accepts[0].maxAmountRequired);
-  assert.ok(BigInt(quote.payment.amountBase) > 69_000_000n);
+  // Agents pay $0.50, a unique amount at most 0.009999 above it; the web keeps $69.
+  assert.ok(BigInt(quote.payment.amountBase) > 500_000n && BigInt(quote.payment.amountBase) < 510_000n);
 
   // Someone else's payment of the plain price does not pay this quote.
-  receipts.set(tx(1), receipt({ amount: 69_000_000 }));
+  receipts.set(tx(1), receipt({ amount: 500_000 }));
   const wrong = await post("/agent/scan", { jobId: quote.jobId, txHash: tx(1) });
   assert.equal(wrong.status, 402);
   assert.match((await wrong.json()).error, /does not equal/);
@@ -210,7 +227,7 @@ test("x402 v2 on Base: header quote, settled on our terms, checked on-chain, no 
   const [req] = required.accepts;
   assert.equal(req.network, BASE_MAINNET);
   assert.equal(req.asset, BASE_USDC.address);
-  assert.equal(req.amount, "69000000");
+  assert.equal(req.amount, "500000");
   assert.equal(req.payTo, MERCHANT);
   assert.deepEqual(req.extra, { name: "USD Coin", version: "2" });
   assert.equal(required.extensions.bazaar.info.input.method, "POST");
@@ -237,7 +254,7 @@ test("x402 v2 on Base: header quote, settled on our terms, checked on-chain, no 
   const ok = await pay("0xgood", { ...req, amount: "1", payTo: PAYER });
   assert.equal(ok.status, 200);
   for (const c of facCalls) {
-    assert.equal(c.body.paymentRequirements.amount, "69000000");
+    assert.equal(c.body.paymentRequirements.amount, "500000");
     assert.equal(c.body.paymentRequirements.payTo, MERCHANT);
     assert.equal(c.body.paymentRequirements.asset, BASE_USDC.address);
   }
@@ -245,7 +262,7 @@ test("x402 v2 on Base: header quote, settled on our terms, checked on-chain, no 
   const paid = await ok.json();
   const st = await fetch(`${base}/agent/jobs/${paid.jobId}`, { headers: { authorization: `Bearer ${paid.accessToken}` } });
   assert.equal(st.status, 200);
-  assert.equal((await st.json()).amount, "69.000000");
+  assert.equal((await st.json()).amount, "0.500000");
 
   // The same authorization again, even in different case, pays for nothing.
   assert.equal((await pay("0xGOOD")).status, 409);
@@ -260,4 +277,49 @@ test("ERC-8004 registration file: x402 service, own domain, no registration befo
   assert.ok(reg.services.some((s) => s.name === "x402" && s.endpoint === `${base}/agent/scan`));
   assert.deepEqual(reg.registrations, []);
   assert.equal((await fetch(reg.image)).status, 200);
+});
+
+test("per-request check on Base: instant answer, settled only once the answer exists", async () => {
+  const check = (body, header) => fetch(`${base}/agent/check`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(header ? { "payment-signature": header } : {}) },
+    body: JSON.stringify(body),
+  });
+  const packages = [{ name: "@openzeppelin/contracts", version: "4.8.0" }, { name: "solmate", version: "6.2.0" }, { name: "@openzeppelin/contracts", version: "4.8.0" }];
+
+  assert.equal((await check({ packages: [] })).status, 400);
+  assert.equal((await check({ packages: [{ name: "a b", version: "1" }] })).status, 400);
+
+  const q = await check({ packages });
+  assert.equal(q.status, 402);
+  const required = decodeHeader(q.headers.get("payment-required"));
+  const [req] = required.accepts;
+  assert.equal(req.amount, "10000"); // $0.01
+  assert.equal(req.network, BASE_MAINNET);
+  assert.equal(req.payTo, MERCHANT);
+  assert.equal(required.resource.url, `${base}/agent/check`);
+  const pay = (signature, accepted = req) => encodeHeader({ x402Version: 2, resource: required.resource, accepted, payload: { signature, authorization: { from: PAYER, to: MERCHANT, value: accepted.amount } }, extensions: required.extensions });
+
+  osvCalls.length = 0;
+  assert.equal((await check({ packages }, pay("0xbad"))).status, 402);
+  assert.equal(osvCalls.length, 0);
+
+  osvDown = true; facCalls.length = 0;
+  assert.equal((await check({ packages }, pay("0xchk1"))).status, 502);
+  assert.deepEqual(facCalls.map((c) => c.path), ["/verify"]);
+  osvDown = false;
+
+  facCalls.length = 0; osvCalls.length = 0;
+  const ok = await check({ packages }, pay("0xchk1", { ...req, amount: "1", payTo: PAYER }));
+  assert.equal(ok.status, 200);
+  assert.equal(osvCalls.length, 2);
+  assert.deepEqual(facCalls.map((c) => c.path), ["/verify", "/settle"]);
+  for (const c of facCalls) { assert.equal(c.body.paymentRequirements.amount, "10000"); assert.equal(c.body.paymentRequirements.payTo, MERCHANT); }
+  const out = await ok.json();
+  assert.equal(out.checked, 2);
+  assert.equal(out.advisories.length, 1);
+  assert.equal(out.advisories[0].id, "GHSA-93hq-5wgc-jc82");
+
+  assert.equal((await check({ packages }, pay("0xCHK1"))).status, 409);
+  assert.equal((await check({ packages }, pay("0xchk2"))).status, 200);
 });

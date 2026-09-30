@@ -13,7 +13,9 @@ primary_region = "cdg"
   PORT = "8080"
   JOBS_FILE = "/data/jobs.json"
   PUBLIC_BASE_URL = "https://evm-watchdog-scan.fly.dev"
-  SCAN_PRICE_USD = "69"
+  SCAN_PRICE_USD = "69"          # web, humans
+  AGENT_SCAN_PRICE_USD = "0.5"   # agents, full scan
+  CHECK_PRICE_USD = "0.01"       # agents, per-request advisory check
 
 [[mounts]]
   source = "evmwdata"

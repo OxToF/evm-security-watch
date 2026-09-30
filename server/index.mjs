@@ -20,7 +20,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runScan, parseGithubUrl, WATCHDOG_LOGO, fixMailto } from "../bin/scan.mjs";
+import { runScan, parseGithubUrl, WATCHDOG_LOGO, fixMailto, scanDependencies } from "../bin/scan.mjs";
 import { Store } from "./store.mjs";
 import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
@@ -29,7 +29,13 @@ import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaa
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
-const PRICE_USD = Number(process.env.SCAN_PRICE_USD || 69);
+const PRICE_USD = Number(process.env.SCAN_PRICE_USD || 69); // web: a human, a branded report by email
+// Agents buy per request, at volume: both prices sit under the $1 per-payment cap
+// x402 clients ship with, so an agent on default settings can pay without a human.
+// A PayAI settlement costs about $0.0023 on Base, so a cent still clears it.
+const AGENT_SCAN_PRICE_USD = Number(process.env.AGENT_SCAN_PRICE_USD || 0.5);
+const CHECK_PRICE_USD = Number(process.env.CHECK_PRICE_USD || 0.01);
+const CHECK_MAX_PACKAGES = 100;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 const MERCHANT_WALLET = process.env.MERCHANT_WALLET ? process.env.MERCHANT_WALLET.toLowerCase() : null;
@@ -37,6 +43,8 @@ const RPC_URL = process.env.EVM_RPC_URL || "https://rpc.mainnet.chain.robinhood.
 const QUOTE_TTL_MS = Number(process.env.QUOTE_TTL_HOURS || 24) * 3600_000;
 // Unique part of a quote, in base units: up to 0.099999 USDG on top of the price.
 const AMOUNT_SPREAD = 100_000;
+// On a $0.50 agent quote a 0.1 spread would be a fifth of the price: at most 0.009999.
+const AGENT_AMOUNT_SPREAD = 10_000;
 const JOBS_FILE = process.env.JOBS_FILE || join(__dirname, "data", "jobs.json");
 const REPORTS_DIR = process.env.REPORTS_DIR || join(dirname(JOBS_FILE), "reports");
 const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -177,9 +185,9 @@ ${top ? `<div style="background:#f7f8fc;border:1px solid #eaecf3;border-radius:1
 
 // --- quotes and payment -------------------------------------------------------
 
-function createQuote(fields) {
-  const amountBase = store.uniqueAmount(toBase(PRICE_USD), AMOUNT_SPREAD, QUOTE_TTL_MS);
-  return store.create({ ...fields, priceUsd: PRICE_USD, amountBase, expiresAt: new Date(Date.now() + QUOTE_TTL_MS).toISOString() });
+function createQuote(fields, price = PRICE_USD, spread = AMOUNT_SPREAD) {
+  const amountBase = store.uniqueAmount(toBase(price), spread, QUOTE_TTL_MS);
+  return store.create({ ...fields, priceUsd: price, amountBase, expiresAt: new Date(Date.now() + QUOTE_TTL_MS).toISOString() });
 }
 
 function paymentTerms(job) {
@@ -246,7 +254,7 @@ function paymentRequired(job, accessToken) {
     accessToken,
     payment: t,
     x402: facilitator
-      ? `Standard x402 v2 clients: pay ${PRICE_USD} USDC on Base instead, requirements in the PAYMENT-REQUIRED header. Resend this same request with a PAYMENT-SIGNATURE header; the facilitator pays the gas. A new job and its access token come back in the paid response.`
+      ? `Standard x402 v2 clients: pay ${AGENT_SCAN_PRICE_USD} USDC on Base instead, requirements in the PAYMENT-REQUIRED header. Resend this same request with a PAYMENT-SIGNATURE header; the facilitator pays the gas. A new job and its access token come back in the paid response.`
       : undefined,
     howToPay: `${t.note} Then POST ${PUBLIC_BASE}/agent/scan with {"jobId":"${job.id}","txHash":"0x…"}. Keep accessToken: it is shown once and is the only way to read the report.`,
     manual: `${PUBLIC_BASE}/skill.md`,
@@ -261,13 +269,28 @@ function baseRequirements() {
   return {
     scheme: "exact",
     network: BASE_MAINNET,
-    amount: toBase(PRICE_USD).toString(),
+    amount: toBase(AGENT_SCAN_PRICE_USD).toString(),
     asset: BASE_USDC.address,
     payTo: MERCHANT_WALLET,
     maxTimeoutSeconds: 300,
     extra: { name: BASE_USDC.name, version: BASE_USDC.version },
   };
 }
+
+const SCAN_BAZAAR = bazaarExtension({
+  exampleBody: { repo: "https://github.com/morpho-org/morpho-blue" },
+  properties: {
+    repo: { type: "string", description: "Public GitHub repository URL, https://github.com/<owner>/<repo>" },
+    email: { type: "string", description: "Optional. Also email the report here." },
+  },
+  required: ["repo"],
+  outputExample: {
+    jobId: "8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e",
+    status: "paid",
+    accessToken: "<shown once, send as Authorization: Bearer>",
+    statusUrl: `${PUBLIC_BASE}/agent/jobs/8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e`,
+  },
+});
 
 function x402Required(error = "PAYMENT-SIGNATURE header is required") {
   return {
@@ -281,7 +304,7 @@ function x402Required(error = "PAYMENT-SIGNATURE header is required") {
       tags: ["security", "solidity", "evm", "dependencies", "code-scan"],
     },
     accepts: [baseRequirements()],
-    extensions: { bazaar: bazaarExtension({ exampleRepo: "https://github.com/morpho-org/morpho-blue", base: PUBLIC_BASE }) },
+    extensions: { bazaar: SCAN_BAZAAR },
   };
 }
 const quoteHeaders = (error) => (facilitator ? { "payment-required": encodeHeader(x402Required(error)) } : {});
@@ -335,7 +358,7 @@ async function settleX402(res, payload, body) {
     const accessToken = randomBytes(24).toString("base64url");
     const job = store.create({
       repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken),
-      priceUsd: PRICE_USD, amountBase: reqs.amount, status: "paid", paidAt: new Date().toISOString(),
+      priceUsd: AGENT_SCAN_PRICE_USD, amountBase: reqs.amount, status: "paid", paidAt: new Date().toISOString(),
       paymentTx: h, payer: chain.from, authSig: sig, via: "x402", network: "base",
     });
     queue.enqueue(() => runJob(job.id));
@@ -344,6 +367,113 @@ async function settleX402(res, payload, body) {
       statusUrl: `${PUBLIC_BASE}/agent/jobs/${job.id}`,
       poll: "GET statusUrl with Authorization: Bearer <accessToken> every 15s; a scan takes about a minute. accessToken is shown once.",
       tx: `https://basescan.org/tx/${h}`,
+    }, { "payment-response": encodeHeader(s) });
+  } finally {
+    settling.delete(sig);
+  }
+}
+
+// --- per-request advisory check (x402, USDC on Base) ------------------------------
+// No repo, no job: the pinned npm packages in the body, their advisories in the
+// answer. The payment is verified first and settled only once the answer exists,
+// so a lookup that fails costs the agent nothing.
+
+const CHECK_BAZAAR = bazaarExtension({
+  exampleBody: { packages: [{ name: "@openzeppelin/contracts", version: "4.8.0" }] },
+  properties: {
+    packages: {
+      type: "array", minItems: 1, maxItems: CHECK_MAX_PACKAGES,
+      description: "npm packages at the exact versions pinned in the lockfile (OpenZeppelin, solmate, Uniswap, Chainlink, hardhat…)",
+      items: { type: "object", properties: { name: { type: "string" }, version: { type: "string" } }, required: ["name", "version"] },
+    },
+  },
+  required: ["packages"],
+  outputExample: {
+    checked: 1,
+    advisories: [{ id: "GHSA-93hq-5wgc-jc82", packages: ["@openzeppelin/contracts 4.8.0"], severity: "HIGH", summary: "GovernorCompatibilityBravo may trim proposal calldata", url: "https://github.com/advisories/GHSA-93hq-5wgc-jc82" }],
+    notCheckedCount: 0,
+  },
+});
+
+function parsePackages(body) {
+  const pk = body && body.packages;
+  if (!Array.isArray(pk) || pk.length === 0 || pk.length > CHECK_MAX_PACKAGES)
+    throw new Error(`packages must be a list of 1 to ${CHECK_MAX_PACKAGES} {name, version}`);
+  return pk.map((p, i) => {
+    const name = p && String(p.name || ""), version = p && String(p.version || "");
+    if (!/^(@[a-z0-9._~-]{1,100}\/)?[a-z0-9._~-]{1,214}$/i.test(name) || !/^[0-9A-Za-z.+-]{1,64}$/.test(version))
+      throw new Error(`packages[${i}] is not an npm {name, version}`);
+    return { name, version };
+  });
+}
+
+const checkRequirements = () => ({ ...baseRequirements(), amount: toBase(CHECK_PRICE_USD).toString(), maxTimeoutSeconds: 120 });
+
+function checkRequired(error = "PAYMENT-SIGNATURE header is required") {
+  return {
+    x402Version: 2,
+    error,
+    resource: {
+      url: `${PUBLIC_BASE}/agent/check`,
+      description: `EVM Watchdog advisory check: GitHub/OSV advisories affecting up to ${CHECK_MAX_PACKAGES} npm packages at their exact pinned versions. Instant, per request.`,
+      mimeType: "application/json",
+      serviceName: "EVM Watchdog check",
+      tags: ["security", "solidity", "npm", "advisories", "dependencies"],
+    },
+    accepts: [checkRequirements()],
+    extensions: { bazaar: CHECK_BAZAAR },
+  };
+}
+
+async function handleCheck(req, res, body) {
+  let packages;
+  try { packages = parsePackages(body); } catch (e) { return send(res, 400, { error: e.message }); }
+  const quote = (error) => ({ "payment-required": encodeHeader(checkRequired(error)) });
+  const header = req.headers["payment-signature"];
+  if (!header) return send(res, 402, { error: "payment_required", priceUsdc: CHECK_PRICE_USD, x402: "USDC on Base. Requirements are in the PAYMENT-REQUIRED header; resend with PAYMENT-SIGNATURE.", manual: `${PUBLIC_BASE}/skill.md` }, quote());
+  const payload = decodeHeader(header);
+  if (!payload || payload.x402Version !== 2 || !payload.payload || !payload.accepted)
+    return send(res, 400, { error: "PAYMENT-SIGNATURE is not a base64 x402 v2 PaymentPayload" });
+  if (payload.accepted.network !== BASE_MAINNET || payload.accepted.scheme !== "exact")
+    return send(res, 402, { error: `this endpoint settles x402 "exact" on ${BASE_MAINNET} only` }, quote("wrong network"));
+  const sig = String(payload.payload.signature || "").toLowerCase();
+  if (!sig) return send(res, 400, { error: "PAYMENT-SIGNATURE carries no signature" });
+  if (settling.has(sig) || store.list((j) => j.authSig === sig).length) return send(res, 409, { error: "payment already used" });
+  settling.add(sig);
+  try {
+    const reqs = checkRequirements();
+    let v;
+    try { v = await facilitator.verify(payload, reqs); }
+    catch (e) { return send(res, 502, { error: `facilitator unreachable, nothing charged: ${e.message}` }); }
+    if (!v.isValid) {
+      const error = `payment not valid: ${v.invalidReason || "rejected by facilitator"}`;
+      return send(res, 402, { error }, quote(error));
+    }
+    const uniq = [...new Map(packages.map((p) => [`${p.name}@${p.version}`, p])).values()];
+    const deps = await scanDependencies(uniq, globalThis.fetch);
+    if (deps.failures === uniq.length) return send(res, 502, { error: "advisory database unreachable, nothing charged; try again" });
+    let s;
+    try { s = await facilitator.settle(payload, reqs); }
+    catch (e) {
+      store.create({ kind: "check", agent: true, status: "settle_unknown", authSig: sig, priceUsd: CHECK_PRICE_USD, via: "x402", network: "base", error: String(e.message).slice(0, 300) });
+      return send(res, 502, { error: "settlement outcome unknown, do not pay again", contact: CONTACT });
+    }
+    if (!s.success || !s.transaction) {
+      const error = `settlement failed, nothing charged: ${s.errorReason || "unknown"}`;
+      return send(res, 402, { error }, { ...quote(error), "payment-response": encodeHeader(s) });
+    }
+    const h = String(s.transaction).toLowerCase();
+    if (store.findByPayment(h)) return send(res, 409, { error: "payment already used" });
+    store.create({
+      kind: "check", agent: true, status: "done", authSig: sig, paymentTx: h, payer: s.payer || null,
+      priceUsd: CHECK_PRICE_USD, via: "x402", network: "base", packages: uniq.length, advisoriesFound: deps.advisories.length, paidAt: new Date().toISOString(),
+    });
+    return send(res, 200, {
+      checked: uniq.length - deps.failures,
+      advisories: deps.advisories,
+      notCheckedCount: deps.failures, // packages the advisory database did not answer for: check them again
+      tx: `https://basescan.org/tx/${h}`,
+      disclaimer: "Known advisories for these exact versions. Not an audit of the code that uses them.",
     }, { "payment-response": encodeHeader(s) });
   } finally {
     settling.delete(sig);
@@ -432,7 +562,9 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && (url.pathname === "/skill.md" || url.pathname === "/agent")) {
       return send(res, 200, SKILL_MD
         .replaceAll("{{BASE}}", PUBLIC_BASE)
-        .replaceAll("{{PRICE}}", String(PRICE_USD))
+        .replaceAll("{{PRICE}}", String(AGENT_SCAN_PRICE_USD))
+        .replaceAll("{{CHECK_PRICE}}", String(CHECK_PRICE_USD))
+        .replaceAll("{{CHECK_MAX}}", String(CHECK_MAX_PACKAGES))
         .replaceAll("{{TOKEN}}", USDG.address)
         .replaceAll("{{MERCHANT}}", MERCHANT_WALLET || "(not configured)"), { "content-type": "text/markdown; charset=utf-8" });
     }
@@ -488,8 +620,14 @@ const server = createServer(async (req, res) => {
       try { repoInfo = parseGithubUrl(body.repo || ""); } catch (e) { return send(res, 400, { error: e.message }); }
       if (body.email && !validEmail(body.email)) return send(res, 400, { error: "email is optional, but this one is not valid" });
       const accessToken = randomBytes(24).toString("base64url");
-      const job = createQuote({ repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken) });
+      const job = createQuote({ repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken) }, AGENT_SCAN_PRICE_USD, AGENT_AMOUNT_SPREAD);
       return send(res, 402, paymentRequired(job, accessToken), quoteHeaders());
+    }
+
+    if (req.method === "POST" && url.pathname === "/agent/check") {
+      if (!MERCHANT_WALLET || !facilitator) return send(res, 503, { error: "payments not configured" });
+      if (rateLimited(ip, 120)) return send(res, 429, { error: "rate limited" });
+      return handleCheck(req, res, await readBody(req));
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/agent/jobs/")) {
@@ -539,7 +677,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
-  console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG`);
+  console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG web · agents ${AGENT_SCAN_PRICE_USD} scan / ${CHECK_PRICE_USD} check`);
   console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${rpcHost(RPC_URL)}`);
   console.log(`[server] x402 ${facilitator ? `USDC on Base via ${rpcHost(FACILITATOR_URL)} · base rpc ${rpcHost(BASE_RPC_URL)}` : "OFF"}`);
 });
