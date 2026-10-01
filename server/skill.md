@@ -9,6 +9,7 @@ Base URL: `{{BASE}}`
 | Request | Price | Pay with | Answer |
 |---|---|---|---|
 | `POST /agent/contract` | **{{CONTRACT_PRICE}} USDC** | x402, USDC on Base | instant: who can change a deployed contract on Base or Robinhood Chain, and is its code verified |
+| `POST /agent/watch` | **{{WATCH_PRICE}} USDC** | x402, USDC on Base | {{WATCH_DAYS}} days of hourly checks of a contract or a lockfile, a signed webhook on each change |
 | `POST /agent/check` | **{{CHECK_PRICE}} USDC** | x402, USDC on Base | instant: advisories for a whole `package-lock.json` / `yarn.lock`, or up to {{CHECK_MAX}} listed npm packages, at exact versions |
 | `POST /agent/scan` | **{{PRICE}} USDC** | x402, USDC on Base, or USDG on Robinhood Chain | a job: full scan of a public GitHub repo, report in about a minute |
 
@@ -40,6 +41,35 @@ POST {{BASE}}/agent/contract
 
 An address with no contract code is answered 404 and **not charged**. It says
 who controls the contract, not whether its code is safe.
+
+## Watch (`/agent/watch`)
+
+Pay once, get told when something you rely on changes, for {{WATCH_DAYS}} days.
+
+```sh
+POST {{BASE}}/agent/watch
+{"address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","chain":"base","webhook":"https://you.example/hooks/watchdog"}
+```
+
+or `{"lockfile":"<package-lock.json or yarn.lock>","webhook":"…"}`.
+
+- **Contract**: pages on `implementation-changed`, `upgrade-controller-changed`,
+  `upgrade-controller-safe-changed`, `upgrade-controller-timelock-changed`,
+  `owner-changed` (and its Safe / timelock variants), `verification-lost`,
+  `code-removed`.
+- **Lockfile**: pages on `new-advisory` for a pinned package.
+
+The paid answer (**HTTP 200**) holds the `baseline`, plus `watchId`, `secret`
+and `accessToken`, **each shown once**: save them. Each change is a `POST` to
+your webhook with header `x-watchdog-signature: sha256=<hex HMAC-SHA256 of the
+raw body, keyed with secret>`. Verify it before acting. One page per change.
+
+`GET statusUrl` with `Authorization: Bearer <accessToken>` lists the events
+(also kept when your webhook was down); `DELETE` cancels.
+
+The webhook must be `https` on a public address; redirects are not followed.
+Checks are hourly; a check that cannot reach the chain or the advisory
+database is retried, never reported as a change.
 
 ## Per-request check (`/agent/check`)
 
