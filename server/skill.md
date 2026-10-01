@@ -8,10 +8,38 @@ Base URL: `{{BASE}}`
 
 | Request | Price | Pay with | Answer |
 |---|---|---|---|
+| `POST /agent/contract` | **{{CONTRACT_PRICE}} USDC** | x402, USDC on Base | instant: who can change a deployed contract on Base or Robinhood Chain, and is its code verified |
 | `POST /agent/check` | **{{CHECK_PRICE}} USDC** | x402, USDC on Base | instant: advisories for a whole `package-lock.json` / `yarn.lock`, or up to {{CHECK_MAX}} listed npm packages, at exact versions |
 | `POST /agent/scan` | **{{PRICE}} USDC** | x402, USDC on Base, or USDG on Robinhood Chain | a job: full scan of a public GitHub repo, report in about a minute |
 
 x402 prices sit under the $1 per-payment cap x402 clients ship with.
+
+## Contract check (`/agent/contract`)
+
+Before you approve a token, deposit, or sign for a contract: who can change it?
+
+```sh
+POST {{BASE}}/agent/contract
+{"address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","chain":"base"}
+```
+
+`chain` is `base` (default) or `robinhood`. The paid answer is **HTTP 200** with:
+
+- `proxy.kind`: `transparent`, `transparent-legacy` (pre-EIP-1967 slots),
+  `uups`, `beacon`, `diamond`, `eip1167-clone` (fixed forever), `eip7702` (a
+  key-held account running delegated code), or `null` (not a proxy: the code
+  cannot change), plus the live `implementation`.
+- `upgradeController` and `owner`, each followed to the end: `single-key`
+  (no code: one private key), `safe` (`threshold`, `owners`), `timelock`
+  (`minDelaySeconds`), `owned-contract` (with `ownedBy`, e.g. a ProxyAdmin and
+  its owner), or `contract`.
+- `verified`: Sourcify match for the address and the live implementation.
+- `flags`, most severe first: `single-key-upgrade`, `safe-1-of-n`,
+  `eoa-delegated` are `high`; `unverified-implementation`, `single-key-owner`,
+  `timelock-zero-delay` are `medium`.
+
+An address with no contract code is answered 404 and **not charged**. It says
+who controls the contract, not whether its code is safe.
 
 ## Per-request check (`/agent/check`)
 

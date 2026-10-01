@@ -384,3 +384,29 @@ test("/agent/check takes a whole package-lock.json or yarn.lock, registry packag
   assert.deepEqual(facCalls.map((c) => c.path), ["/verify"]);
   osvDown = false;
 });
+
+test("/agent/contract: priced apart, an address with no code costs nothing", async () => {
+  const call = (body, header) => fetch(`${base}/agent/contract`, {
+    method: "POST", headers: { "content-type": "application/json", ...(header ? { "payment-signature": header } : {}) }, body: JSON.stringify(body),
+  });
+  assert.equal((await call({ address: "0x123" })).status, 400);
+  assert.equal((await call({ address: MERCHANT, chain: "solana" })).status, 400);
+  const q = await call({ address: MERCHANT });
+  assert.equal(q.status, 402);
+  const required = decodeHeader(q.headers.get("payment-required"));
+  const [req] = required.accepts;
+  assert.equal(req.amount, "50000"); // $0.05
+  assert.equal(req.network, BASE_MAINNET);
+  assert.equal(required.resource.url, `${base}/agent/contract`);
+  assert.ok(required.resource.serviceName.length <= 32);
+  assert.deepEqual(required.extensions.bazaar.schema.properties.input.properties.body.required, ["address"]);
+
+  // The fake chain has no code there: verified, looked up, refused, never settled.
+  facCalls.length = 0;
+  const pay = encodeHeader({ x402Version: 2, resource: required.resource, accepted: req, payload: { signature: "0xctr1", authorization: { from: PAYER, to: MERCHANT, value: req.amount } }, extensions: required.extensions });
+  const r = await call({ address: MERCHANT }, pay);
+  assert.equal(r.status, 404);
+  assert.match((await r.json()).error, /Nothing charged/);
+  assert.deepEqual(facCalls.map((c) => c.path), ["/verify"]);
+});
+

@@ -26,6 +26,7 @@ import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
 import { verifyUsdgPayment, USDG, toBase, formatUnits } from "./verify.mjs";
 import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaarExtension } from "./x402.mjs";
+import { inspectContract, isAddress } from "./contract.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -55,6 +56,8 @@ const EXPLORER = "https://robinhoodchain.blockscout.com";
 // x402 on Base. "off" leaves only the USDG rail.
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://facilitator.payai.network";
 const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
+const CONTRACT_PRICE_USD = Number(process.env.CONTRACT_PRICE_USD || 0.05);
+const CONTRACT_CHAINS = { base: BASE_RPC_URL, robinhood: RPC_URL };
 const SUPPORT = process.env.SUPPORT_EMAIL || null;
 const CONTACT = SUPPORT || "solanawatchdog@proton.me";
 
@@ -446,12 +449,12 @@ function checkRequired(error = "PAYMENT-SIGNATURE header is required") {
   };
 }
 
-async function handleCheck(req, res, body) {
-  let packages, lockfile;
-  try { ({ packages, lockfile } = parseCheckInput(body)); } catch (e) { return send(res, 400, { error: e.message }); }
-  const quote = (error) => ({ "payment-required": encodeHeader(checkRequired(error)) });
+// One paid answer per request: verify the payment, compute, settle only once the
+// answer exists. compute() returns { body, record } or { status, error } (nothing charged).
+async function paidRequest(req, res, { requirements, required, priceUsd, kind, compute }) {
+  const quote = (error) => ({ "payment-required": encodeHeader(required(error)) });
   const header = req.headers["payment-signature"];
-  if (!header) return send(res, 402, { error: "payment_required", priceUsdc: CHECK_PRICE_USD, x402: "USDC on Base. Requirements are in the PAYMENT-REQUIRED header; resend with PAYMENT-SIGNATURE.", manual: `${PUBLIC_BASE}/skill.md` }, quote());
+  if (!header) return send(res, 402, { error: "payment_required", priceUsdc: priceUsd, x402: "USDC on Base. Requirements are in the PAYMENT-REQUIRED header; resend with PAYMENT-SIGNATURE.", manual: `${PUBLIC_BASE}/skill.md` }, quote());
   const payload = decodeHeader(header);
   if (!payload || payload.x402Version !== 2 || !payload.payload || !payload.accepted)
     return send(res, 400, { error: "PAYMENT-SIGNATURE is not a base64 x402 v2 PaymentPayload" });
@@ -462,7 +465,7 @@ async function handleCheck(req, res, body) {
   if (settling.has(sig) || store.list((j) => j.authSig === sig).length) return send(res, 409, { error: "payment already used" });
   settling.add(sig);
   try {
-    const reqs = checkRequirements();
+    const reqs = requirements();
     let v;
     try { v = await facilitator.verify(payload, reqs); }
     catch (e) { return send(res, 502, { error: `facilitator unreachable, nothing charged: ${e.message}` }); }
@@ -470,13 +473,12 @@ async function handleCheck(req, res, body) {
       const error = `payment not valid: ${v.invalidReason || "rejected by facilitator"}`;
       return send(res, 402, { error }, quote(error));
     }
-    const uniq = [...new Map(packages.map((p) => [`${p.name}@${p.version}`, p])).values()];
-    const deps = lockfile ? await scanDependenciesBatch(uniq, globalThis.fetch) : await scanDependencies(uniq, globalThis.fetch);
-    if (deps.failures === uniq.length) return send(res, 502, { error: "advisory database unreachable, nothing charged; try again" });
+    const answer = await compute();
+    if (answer.error) return send(res, answer.status || 502, { error: answer.error });
     let s;
     try { s = await facilitator.settle(payload, reqs); }
     catch (e) {
-      store.create({ kind: "check", agent: true, status: "settle_unknown", authSig: sig, priceUsd: CHECK_PRICE_USD, via: "x402", network: "base", error: String(e.message).slice(0, 300) });
+      store.create({ kind, agent: true, status: "settle_unknown", authSig: sig, priceUsd, via: "x402", network: "base", error: String(e.message).slice(0, 300) });
       return send(res, 502, { error: "settlement outcome unknown, do not pay again", contact: CONTACT });
     }
     if (!s.success || !s.transaction) {
@@ -486,20 +488,105 @@ async function handleCheck(req, res, body) {
     const h = String(s.transaction).toLowerCase();
     if (store.findByPayment(h)) return send(res, 409, { error: "payment already used" });
     store.create({
-      kind: "check", agent: true, status: "done", authSig: sig, paymentTx: h, payer: s.payer || null,
-      priceUsd: CHECK_PRICE_USD, via: "x402", network: "base", packages: uniq.length, advisoriesFound: deps.advisories.length, paidAt: new Date().toISOString(),
+      kind, agent: true, status: "done", authSig: sig, paymentTx: h, payer: s.payer || null,
+      priceUsd, via: "x402", network: "base", ...answer.record, paidAt: new Date().toISOString(),
     });
-    return send(res, 200, {
-      checked: uniq.length - deps.failures,
-      advisories: deps.advisories,
-      notCheckedCount: deps.failures, // packages the advisory database did not answer for: check them again
-      ...(lockfile ? { lockfile } : {}),
-      tx: `https://basescan.org/tx/${h}`,
-      disclaimer: "Known advisories for these exact versions. Not an audit of the code that uses them.",
-    }, { "payment-response": encodeHeader(s) });
+    return send(res, 200, { ...answer.body, tx: `https://basescan.org/tx/${h}` }, { "payment-response": encodeHeader(s) });
   } finally {
     settling.delete(sig);
   }
+}
+
+async function handleCheck(req, res, body) {
+  let packages, lockfile;
+  try { ({ packages, lockfile } = parseCheckInput(body)); } catch (e) { return send(res, 400, { error: e.message }); }
+  return paidRequest(req, res, {
+    requirements: checkRequirements, required: checkRequired, priceUsd: CHECK_PRICE_USD, kind: "check",
+    compute: async () => {
+      const uniq = [...new Map(packages.map((p) => [`${p.name}@${p.version}`, p])).values()];
+      const deps = lockfile ? await scanDependenciesBatch(uniq, globalThis.fetch) : await scanDependencies(uniq, globalThis.fetch);
+      if (deps.failures === uniq.length) return { status: 502, error: "advisory database unreachable, nothing charged; try again" };
+      return {
+        record: { packages: uniq.length, advisoriesFound: deps.advisories.length },
+        body: {
+          checked: uniq.length - deps.failures,
+          advisories: deps.advisories,
+          notCheckedCount: deps.failures, // packages the advisory database did not answer for: check them again
+          ...(lockfile ? { lockfile } : {}),
+          disclaimer: "Known advisories for these exact versions. Not an audit of the code that uses them.",
+        },
+      };
+    },
+  });
+}
+
+// --- per-request contract check -----------------------------------------------------
+// Who can change a deployed contract, and whether its code is public. See contract.mjs.
+
+const CONTRACT_BAZAAR = bazaarExtension({
+  exampleBody: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", chain: "base" },
+  properties: {
+    address: { type: "string", description: "Address of a deployed contract (0x…)." },
+    chain: { type: "string", enum: Object.keys(CONTRACT_CHAINS), description: "base (default) or robinhood (Robinhood Chain)." },
+  },
+  required: ["address"],
+  outputExample: {
+    address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", chain: "base",
+    proxy: { kind: "transparent-legacy" }, implementation: "0x2ce6311ddae708829bc0784c967b7d77d19fd779",
+    upgradeController: { address: "0x…", kind: "single-key", text: "An address with no code: one private key." },
+    verified: { contract: "exact_match", implementation: "exact_match" },
+    flags: [{ severity: "high", id: "single-key-upgrade", text: "One private key (0x…) can replace this contract's code at any time." }],
+  },
+});
+
+const contractRequirements = () => ({ ...checkRequirements(), amount: toBase(CONTRACT_PRICE_USD).toString() });
+
+function contractRequired(error = "PAYMENT-SIGNATURE header is required") {
+  return {
+    x402Version: 2,
+    error,
+    resource: {
+      url: `${PUBLIC_BASE}/agent/contract`,
+      description: "Use this before approving or depositing into a contract on Base or Robinhood Chain: is it a proxy, who can change its code (single key, Safe with threshold, timelock with delay), who owns it, is the live code verified on Sourcify. Instant, per request.",
+      mimeType: "application/json",
+      serviceName: "EVM Watchdog contract",
+      tags: ["security", "evm", "base", "proxy", "upgrade", "due-diligence"],
+    },
+    accepts: [contractRequirements()],
+    extensions: { bazaar: CONTRACT_BAZAAR },
+  };
+}
+
+const chainRpc = (url) => async (method, params) => {
+  for (let i = 0; ; i++) {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    if (r.status === 429 && i < 3) { await new Promise((s) => setTimeout(s, 700 * (i + 1))); continue; }
+    if (!r.ok) throw new Error(`${method}: HTTP ${r.status}`);
+    const j = await r.json();
+    if (j.error) throw new Error(`${method}: ${j.error.message || JSON.stringify(j.error)}`);
+    return j.result;
+  }
+};
+
+async function handleContract(req, res, body) {
+  const address = body && body.address;
+  const chain = (body && body.chain) || "base";
+  if (!isAddress(address)) return send(res, 400, { error: "address must be a 0x contract address" });
+  if (!CONTRACT_CHAINS[chain]) return send(res, 400, { error: `chain must be one of ${Object.keys(CONTRACT_CHAINS).join(", ")}` });
+  return paidRequest(req, res, {
+    requirements: contractRequirements, required: contractRequired, priceUsd: CONTRACT_PRICE_USD, kind: "contract",
+    compute: async () => {
+      let r;
+      try { r = await inspectContract(address, { chain, rpc: chainRpc(CONTRACT_CHAINS[chain]) }); }
+      catch (e) { return { status: 502, error: `chain lookup failed, nothing charged: ${String(e.message).slice(0, 200)}` }; }
+      // Nothing to inspect is not worth a charge: most likely a wrong address or chain.
+      if (!r.isContract) return { status: 404, error: `${r.flags[0].text} Nothing charged.` };
+      return {
+        record: { address: r.address, chain, flags: r.flags.map((f) => f.id) },
+        body: { ...r, disclaimer: "Who controls this contract and whether its code is public. Not an audit of its code." },
+      };
+    },
+  });
 }
 
 function agentJobView(job) {
@@ -531,11 +618,13 @@ function agentRegistration() {
   return {
     type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
     name: "EVM Watchdog",
-    description: "Security scan of a public Solidity GitHub repo (Foundry or Hardhat): advisories on the exact pinned versions of npm, soldeer and git-submodule dependencies, split into the on-chain surface and the toolchain, unresolved dependencies listed as not checked, and leads for 14 known Solidity bug classes with file:line. JSON + Markdown + HTML report. Agents pay per call over x402 (USDC on Base). A scan, not an audit.",
+    description: "Security checks for Solidity code and deployed contracts. Who can change a contract on Base or Robinhood Chain (proxy kind, single key, Safe threshold, timelock delay) and whether its live code is verified, before you approve or deposit; npm advisories for a lockfile; and a full scan of a public Solidity GitHub repo (Foundry or Hardhat): advisories on the exact pinned versions of npm, soldeer and git-submodule dependencies, split into the on-chain surface and the toolchain, unresolved dependencies listed as not checked, and leads for 14 known Solidity bug classes with file:line. JSON + Markdown + HTML report. Agents pay per call over x402 (USDC on Base). A scan, not an audit.",
     image: `${PUBLIC_BASE}/favicon.svg`,
     services: [
       { name: "web", endpoint: `${PUBLIC_BASE}/` },
       { name: "x402", endpoint: `${PUBLIC_BASE}/agent/scan` },
+      { name: "x402", endpoint: `${PUBLIC_BASE}/agent/contract` },
+      { name: "x402", endpoint: `${PUBLIC_BASE}/agent/check` },
       { name: "agent-manual", endpoint: `${PUBLIC_BASE}/skill.md` },
     ],
     x402Support: Boolean(facilitator),
@@ -586,6 +675,7 @@ const server = createServer(async (req, res) => {
         .replaceAll("{{BASE}}", PUBLIC_BASE)
         .replaceAll("{{PRICE}}", String(AGENT_SCAN_PRICE_USD))
         .replaceAll("{{CHECK_PRICE}}", String(CHECK_PRICE_USD))
+        .replaceAll("{{CONTRACT_PRICE}}", String(CONTRACT_PRICE_USD))
         .replaceAll("{{CHECK_MAX}}", String(CHECK_MAX_PACKAGES))
         .replaceAll("{{TOKEN}}", USDG.address)
         .replaceAll("{{MERCHANT}}", MERCHANT_WALLET || "(not configured)"), { "content-type": "text/markdown; charset=utf-8" });
@@ -644,6 +734,14 @@ const server = createServer(async (req, res) => {
       const accessToken = randomBytes(24).toString("base64url");
       const job = createQuote({ repo: repoInfo.url, email: body.email || null, agent: true, accessTokenHash: hashToken(accessToken) }, AGENT_SCAN_PRICE_USD, AGENT_AMOUNT_SPREAD);
       return send(res, 402, paymentRequired(job, accessToken), quoteHeaders());
+    }
+
+    if (req.method === "POST" && url.pathname === "/agent/contract") {
+      if (!MERCHANT_WALLET || !facilitator) return send(res, 503, { error: "payments not configured" });
+      if (rateLimited(ip, 120)) return send(res, 429, { error: "rate limited" });
+      let body;
+      try { body = await readBody(req); } catch { return send(res, 400, { error: "bad json" }); }
+      return handleContract(req, res, body);
     }
 
     if (req.method === "POST" && url.pathname === "/agent/check") {
