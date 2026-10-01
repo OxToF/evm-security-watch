@@ -16,6 +16,9 @@ primary_region = "cdg"
   SCAN_PRICE_USD = "69"          # web, humans
   AGENT_SCAN_PRICE_USD = "0.5"   # agents, full scan
   CHECK_PRICE_USD = "0.01"       # agents, per-request advisory check
+  CONTRACT_PRICE_USD = "0.05"    # agents, per-request contract check
+  WATCH_PRICE_USD = "0.9"        # agents, one watch for WATCH_DAYS
+  WATCH_DAYS = "30"
 
 [[mounts]]
   source = "evmwdata"
@@ -24,7 +27,9 @@ primary_region = "cdg"
 [http_service]
   internal_port = 8080
   force_https = true
-  # A scan runs after the payment is verified; the machine must not stop mid-job.
+  # A scan runs after the payment is verified; the machine must not stop mid-job,
+  # and the watch scheduler runs in this process (one machine, one volume: two
+  # machines would page every change twice).
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1

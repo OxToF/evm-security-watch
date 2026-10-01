@@ -3,7 +3,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +54,7 @@ test("amounts: base units without floats, and no two open quotes share one", () 
 });
 
 // --- end to end ---------------------------------------------------------------
-let rpc, baseRpc, fac, osv, srv, base, osvDown = false;
+let rpc, baseRpc, fac, osv, srv, base, testDir, osvDown = false, solmateVuln = false;
 const osvCalls = [];
 const facCalls = [];
 const X402_TX = "0x" + "b".repeat(64);
@@ -99,7 +100,7 @@ before(async () => {
       const sig = body.paymentPayload.payload.signature;
       res.writeHead(200, { "content-type": "application/json" });
       if (req.url === "/verify") return res.end(JSON.stringify(sig === "0xbad" ? { isValid: false, invalidReason: "invalid_exact_evm_payload_signature" } : { isValid: true, payer: PAYER }));
-      const settled = { "0xchk1": "0x" + "c".repeat(64), "0xchk2": "0x" + "d".repeat(64), "0xchk3": "0x" + "e".repeat(64) }[sig] || X402_TX;
+      const settled = { "0xchk1": "0x" + "c".repeat(64), "0xchk2": "0x" + "d".repeat(64), "0xchk3": "0x" + "e".repeat(64), "0xwatch1": "0x" + "f".repeat(64) }[sig] || X402_TX;
       res.end(JSON.stringify(sig === "0xnosettle"
         ? { success: false, errorReason: "insufficient_funds", transaction: "", network: BASE_MAINNET }
         : { success: true, transaction: settled, network: BASE_MAINNET, payer: PAYER }));
@@ -116,12 +117,15 @@ before(async () => {
         const { queries } = JSON.parse(b);
         osvCalls.push({ batch: queries.map((q) => `${q.package.name}@${q.version}`) });
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ results: queries.map((q) => (q.package.name === "@openzeppelin/contracts" ? { vulns: [{ id: "GHSA-93hq-5wgc-jc82" }] } : {})) }));
+        return res.end(JSON.stringify({ results: queries.map((q) => (q.package.name === "@openzeppelin/contracts" ? { vulns: [{ id: "GHSA-93hq-5wgc-jc82" }] }
+          : q.package.name === "solmate" && solmateVuln ? { vulns: [{ id: "GHSA-test-solm-ate1" }] } : {})) }));
       }
       if (req.url.startsWith("/v1/vulns/")) {
         osvCalls.push({ vuln: req.url });
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ id: "GHSA-93hq-5wgc-jc82", aliases: ["CVE-2023-30542"], summary: "GovernorCompatibilityBravo may trim proposal calldata" }));
+        return res.end(JSON.stringify(req.url.endsWith("GHSA-test-solm-ate1")
+          ? { id: "GHSA-test-solm-ate1", summary: "solmate test advisory", database_specific: { severity: "HIGH" } }
+          : { id: "GHSA-93hq-5wgc-jc82", aliases: ["CVE-2023-30542"], summary: "GovernorCompatibilityBravo may trim proposal calldata" }));
       }
       const q = JSON.parse(b);
       osvCalls.push(q);
@@ -133,7 +137,8 @@ before(async () => {
   base = `http://127.0.0.1:${port}`;
   srv = spawn(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "index.mjs")], {
     env: {
-      ...process.env, PORT: String(port), JOBS_FILE: join(mkdtempSync(join(tmpdir(), "evmw-e2e-")), "jobs.json"),
+      ...process.env, PORT: String(port), JOBS_FILE: join((testDir = mkdtempSync(join(tmpdir(), "evmw-e2e-"))), "jobs.json"),
+      WATCH_ALLOW_PRIVATE_WEBHOOKS: "1", WATCH_TICK_MS: "100", WATCH_INTERVAL_MS: "0",
       MERCHANT_WALLET: MERCHANT, EVM_RPC_URL: `http://127.0.0.1:${rpc.address().port}`, SCAN_PRICE_USD: "69",
       PUBLIC_BASE_URL: base, RESEND_API_KEY: "",
       BASE_RPC_URL: `http://127.0.0.1:${baseRpc.address().port}`, FACILITATOR_URL: `http://127.0.0.1:${fac.address().port}`,
@@ -408,5 +413,63 @@ test("/agent/contract: priced apart, an address with no code costs nothing", asy
   assert.equal(r.status, 404);
   assert.match((await r.json()).error, /Nothing charged/);
   assert.deepEqual(facCalls.map((c) => c.path), ["/verify"]);
+});
+
+test("/agent/watch: created only once paid, signed webhook on a new advisory, readable and cancellable", async () => {
+  const hooks = [];
+  const hook = createServer((req, res) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { hooks.push({ headers: req.headers, body: b }); res.writeHead(204); res.end(); }); });
+  await new Promise((r) => hook.listen(0, r));
+  const webhook = `http://127.0.0.1:${hook.address().port}/hook`;
+  const lockfile = JSON.stringify({ name: "app", lockfileVersion: 3, packages: {
+    "": { name: "app" },
+    "node_modules/@openzeppelin/contracts": { version: "4.8.0", resolved: "https://registry.npmjs.org/x.tgz" },
+    "node_modules/solmate": { version: "6.2.0", resolved: "https://registry.npmjs.org/y.tgz" },
+  } });
+  const call = (body, header) => fetch(`${base}/agent/watch`, {
+    method: "POST", headers: { "content-type": "application/json", ...(header ? { "payment-signature": header } : {}) }, body: JSON.stringify(body),
+  });
+  const onDisk = () => (existsSync(join(testDir, "watches.json")) ? Object.keys(JSON.parse(readFileSync(join(testDir, "watches.json"), "utf8"))).length : 0);
+  try {
+    assert.equal((await call({ lockfile })).status, 400);
+    assert.equal((await call({ address: MERCHANT, chain: "solana", webhook })).status, 400);
+    const q = await call({ lockfile, webhook });
+    assert.equal(q.status, 402);
+    const required = decodeHeader(q.headers.get("payment-required"));
+    const [req] = required.accepts;
+    assert.equal(req.amount, "900000");
+    assert.equal(req.network, BASE_MAINNET);
+    assert.equal(required.resource.url, `${base}/agent/watch`);
+    assert.ok(required.resource.serviceName.length <= 32);
+    const pay = (signature) => encodeHeader({ x402Version: 2, resource: required.resource, accepted: req, payload: { signature, authorization: { from: PAYER, to: MERCHANT, value: req.amount } }, extensions: required.extensions });
+
+    assert.equal((await call({ lockfile, webhook }, pay("0xnosettle"))).status, 402);
+    assert.equal(onDisk(), 0);
+
+    const ok = await call({ lockfile, webhook }, pay("0xwatch1"));
+    assert.equal(ok.status, 200);
+    const sub = await ok.json();
+    assert.equal(onDisk(), 1);
+    assert.deepEqual(sub.baseline.advisories.map((a) => a.id), ["GHSA-93hq-5wgc-jc82"]);
+
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(hooks.length, 0);
+    solmateVuln = true;
+    for (let i = 0; i < 50 && !hooks.length; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(hooks.length, 1);
+    assert.equal(hooks[0].headers["x-watchdog-signature"], "sha256=" + createHmac("sha256", sub.secret).update(hooks[0].body).digest("hex"));
+    assert.deepEqual(JSON.parse(hooks[0].body).events.map((e) => e.advisory.id), ["GHSA-test-solm-ate1"]);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(hooks.length, 1);
+
+    const auth = { authorization: `Bearer ${sub.accessToken}` };
+    assert.equal((await fetch(sub.statusUrl)).status, 404);
+    const view = await (await fetch(sub.statusUrl, { headers: auth })).json();
+    assert.equal(view.events[0].delivered, true);
+    assert.equal(view.secret, undefined);
+    assert.equal((await (await fetch(sub.statusUrl, { method: "DELETE", headers: auth })).json()).status, "cancelled");
+  } finally {
+    solmateVuln = false;
+    hook.close();
+  }
 });
 

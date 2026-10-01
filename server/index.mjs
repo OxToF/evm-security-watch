@@ -27,6 +27,7 @@ import { sendReport } from "./email.mjs";
 import { verifyUsdgPayment, USDG, toBase, formatUnits } from "./verify.mjs";
 import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaarExtension } from "./x402.mjs";
 import { inspectContract, isAddress } from "./contract.mjs";
+import { Watcher, checkWebhookUrl, newSecret, contractSnapshot, diffContract, lockfileSnapshot, diffLockfile } from "./watch.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -58,12 +59,19 @@ const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://facilitator.paya
 const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://mainnet.base.org";
 const CONTRACT_PRICE_USD = Number(process.env.CONTRACT_PRICE_USD || 0.05);
 const CONTRACT_CHAINS = { base: BASE_RPC_URL, robinhood: RPC_URL };
+// A watch is bought once for a fixed period, under the $1 default cap of x402 clients.
+const WATCH_PRICE_USD = Number(process.env.WATCH_PRICE_USD || 0.9);
+const WATCH_DAYS = Number(process.env.WATCH_DAYS || 30);
+const WATCH_INTERVAL_MS = Number(process.env.WATCH_INTERVAL_MS || 60 * 60 * 1000);
+const WATCH_TICK_MS = Number(process.env.WATCH_TICK_MS || 60 * 1000);
+const WATCH_ALLOW_PRIVATE = process.env.WATCH_ALLOW_PRIVATE_WEBHOOKS === "1"; // tests only
 const SUPPORT = process.env.SUPPORT_EMAIL || null;
 const CONTACT = SUPPORT || "solanawatchdog@proton.me";
 
 if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Error("MERCHANT_WALLET is not an 0x address");
 
 const store = new Store(JOBS_FILE);
+const watches = new Store(process.env.WATCHES_FILE || join(dirname(JOBS_FILE), "watches.json"));
 const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL });
 // ERC-8004 identity, once registered on Base: the agentId minted by register().
 const ERC8004_REGISTRY = "eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432";
@@ -85,7 +93,7 @@ function send(res, code, body, extraHeaders = {}) {
   res.writeHead(code, {
     "content-type": typeof body === "string" ? "text/plain" : "application/json",
     "access-control-allow-origin": ALLOW_ORIGIN,
-    "access-control-allow-methods": "POST, GET, OPTIONS",
+    "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, payment-signature",
     "access-control-expose-headers": "payment-required, payment-response",
     ...extraHeaders,
@@ -491,7 +499,9 @@ async function paidRequest(req, res, { requirements, required, priceUsd, kind, c
       kind, agent: true, status: "done", authSig: sig, paymentTx: h, payer: s.payer || null,
       priceUsd, via: "x402", network: "base", ...answer.record, paidAt: new Date().toISOString(),
     });
-    return send(res, 200, { ...answer.body, tx: `https://basescan.org/tx/${h}` }, { "payment-response": encodeHeader(s) });
+    // Anything that must exist only once paid (a watch) is created here, after settlement.
+    const extra = answer.commit ? answer.commit(s) : {};
+    return send(res, 200, { ...answer.body, ...extra, tx: `https://basescan.org/tx/${h}` }, { "payment-response": encodeHeader(s) });
   } finally {
     settling.delete(sig);
   }
@@ -589,6 +599,122 @@ async function handleContract(req, res, body) {
   });
 }
 
+// --- paid watches ------------------------------------------------------------------------
+// One payment buys WATCH_DAYS of hourly re-checks of a contract or a lockfile; a change that
+// matters is POSTed to the agent's webhook, signed with a secret shown once.
+
+const WATCH_BAZAAR = bazaarExtension({
+  exampleBody: { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", chain: "base", webhook: "https://agent.example/hooks/watchdog" },
+  properties: {
+    address: { type: "string", description: "Watch a deployed contract: implementation swaps, upgrade controller, owner, Safe threshold, timelock delay, verification. Send this OR lockfile." },
+    chain: { type: "string", enum: Object.keys(CONTRACT_CHAINS), description: "base (default) or robinhood, with address." },
+    lockfile: { type: "string", description: "Watch a package-lock.json or yarn.lock: any new advisory affecting its pinned packages. Send this OR address." },
+    webhook: { type: "string", description: "https URL that receives a signed POST on every change (header x-watchdog-signature: sha256=HMAC(secret, body))." },
+  },
+  required: ["webhook"],
+  outputExample: { watchId: "…", secret: "shown once", accessToken: "shown once", expiresAt: "…", baseline: { proxy: { kind: "uups" }, upgradeController: { kind: "timelock", minDelaySeconds: 86400 } } },
+});
+
+const watchRequirements = () => ({ ...checkRequirements(), amount: toBase(WATCH_PRICE_USD).toString() });
+
+function watchRequired(error = "PAYMENT-SIGNATURE header is required") {
+  return {
+    x402Version: 2,
+    error,
+    resource: {
+      url: `${PUBLIC_BASE}/agent/watch`,
+      description: `Use this to be told when a contract you rely on (Base, Robinhood Chain) gets new code, a new owner or weaker upgrade rules, or when a new advisory hits your npm lockfile: ${WATCH_DAYS} days of hourly checks, signed webhook on each change. One payment.`,
+      mimeType: "application/json",
+      serviceName: "EVM Watchdog watch",
+      tags: ["security", "evm", "base", "monitoring", "webhook", "proxy", "advisories"],
+    },
+    accepts: [watchRequirements()],
+    extensions: { bazaar: WATCH_BAZAAR },
+  };
+}
+
+// Re-read a watch's target: { snapshot, events }. Throws when the answer is not
+// trustworthy (RPC down, advisory database down), which is never read as "no change".
+async function checkWatch(w) {
+  if (w.target === "contract") {
+    const r = await inspectContract(w.address, { chain: w.chain, rpc: chainRpc(CONTRACT_CHAINS[w.chain]) });
+    const snapshot = contractSnapshot(r);
+    return { snapshot, events: diffContract(w.snapshot, snapshot) };
+  }
+  const deps = await scanDependenciesBatch(w.packages, globalThis.fetch);
+  if (deps.failures) throw new Error(`advisory database did not answer for ${deps.failures} packages`);
+  return { snapshot: lockfileSnapshot(deps.advisories), events: diffLockfile(w.snapshot, lockfileSnapshot(deps.advisories), deps.advisories) };
+}
+
+async function handleWatch(req, res, body) {
+  if (!body || typeof body.webhook !== "string") return send(res, 400, { error: "webhook (an https URL) is required" });
+  let target;
+  if (body.address !== undefined) {
+    if (body.lockfile !== undefined) return send(res, 400, { error: "send address OR lockfile, not both" });
+    const chain = body.chain || "base";
+    if (!isAddress(body.address)) return send(res, 400, { error: "address must be a 0x contract address" });
+    if (!CONTRACT_CHAINS[chain]) return send(res, 400, { error: `chain must be one of ${Object.keys(CONTRACT_CHAINS).join(", ")}` });
+    target = { target: "contract", address: body.address.toLowerCase(), chain, targetSummary: { type: "contract", address: body.address.toLowerCase(), chain } };
+  } else {
+    let parsed;
+    try { parsed = parseCheckInput({ lockfile: body.lockfile }); } catch (e) { return send(res, 400, { error: e.message }); }
+    target = { target: "lockfile", packages: parsed.packages, targetSummary: { type: parsed.lockfile.type, packages: parsed.packages.length } };
+  }
+  try { await checkWebhookUrl(body.webhook, { allowPrivate: WATCH_ALLOW_PRIVATE }); }
+  catch (e) { return send(res, 400, { error: e.message }); }
+  return paidRequest(req, res, {
+    requirements: watchRequirements, required: watchRequired, priceUsd: WATCH_PRICE_USD, kind: "watch",
+    compute: async () => {
+      // The baseline is taken now, so the first webhook means "changed since you subscribed".
+      let baseline, detail;
+      try {
+        if (target.target === "contract") {
+          const r = await inspectContract(target.address, { chain: target.chain, rpc: chainRpc(CONTRACT_CHAINS[target.chain]) });
+          if (!r.isContract) return { status: 404, error: `${r.flags[0].text} Nothing charged.` };
+          baseline = contractSnapshot(r); detail = { proxy: r.proxy, implementation: r.implementation, upgradeController: r.upgradeController, owner: r.owner, verified: r.verified, flags: r.flags };
+        } else {
+          const deps = await scanDependenciesBatch(target.packages, globalThis.fetch);
+          if (deps.failures === target.packages.length) return { status: 502, error: "advisory database unreachable, nothing charged; try again" };
+          baseline = lockfileSnapshot(deps.advisories); detail = { advisories: deps.advisories, notCheckedCount: deps.failures };
+        }
+      } catch (e) { return { status: 502, error: `lookup failed, nothing charged: ${String(e.message).slice(0, 200)}` }; }
+      return {
+        record: { watchTarget: target.targetSummary },
+        body: { baseline: detail, checksEveryMinutes: Math.round(WATCH_INTERVAL_MS / 60000) },
+        commit: () => {
+          const secret = newSecret(), accessToken = randomBytes(24).toString("base64url");
+          const now = new Date();
+          const w = watches.create({
+            ...target, status: "active", webhook: body.webhook, secret, accessTokenHash: hashToken(accessToken),
+            snapshot: baseline, events: [], lastCheckedAt: now.toISOString(),
+            expiresAt: new Date(now.getTime() + WATCH_DAYS * 864e5).toISOString(),
+          });
+          return {
+            watchId: w.id, expiresAt: w.expiresAt,
+            secret, // HMAC key for x-watchdog-signature: shown once
+            accessToken, // for GET / DELETE on statusUrl: shown once
+            statusUrl: `${PUBLIC_BASE}/agent/watch/${w.id}`,
+            signature: "x-watchdog-signature: sha256=hex(HMAC-SHA256(secret, raw request body))",
+          };
+        },
+      };
+    },
+  });
+}
+
+function watchView(w) {
+  return {
+    watchId: w.id, status: w.status, target: w.targetSummary, webhook: w.webhook,
+    createdAt: w.createdAt, expiresAt: w.expiresAt, lastCheckedAt: w.lastCheckedAt || null,
+    lastError: w.lastError || null, events: w.events || [],
+  };
+}
+
+const watcher = new Watcher({
+  store: watches, check: checkWatch, allowPrivate: WATCH_ALLOW_PRIVATE,
+  intervalMs: WATCH_INTERVAL_MS, tickMs: WATCH_TICK_MS, log: (m) => console.log(m),
+});
+
 function agentJobView(job) {
   const view = {
     jobId: job.id, status: job.status, repo: job.repo, amount: formatUnits(job.amountBase),
@@ -625,6 +751,7 @@ function agentRegistration() {
       { name: "x402", endpoint: `${PUBLIC_BASE}/agent/scan` },
       { name: "x402", endpoint: `${PUBLIC_BASE}/agent/contract` },
       { name: "x402", endpoint: `${PUBLIC_BASE}/agent/check` },
+      { name: "x402", endpoint: `${PUBLIC_BASE}/agent/watch` },
       { name: "agent-manual", endpoint: `${PUBLIC_BASE}/skill.md` },
     ],
     x402Support: Boolean(facilitator),
@@ -676,6 +803,8 @@ const server = createServer(async (req, res) => {
         .replaceAll("{{PRICE}}", String(AGENT_SCAN_PRICE_USD))
         .replaceAll("{{CHECK_PRICE}}", String(CHECK_PRICE_USD))
         .replaceAll("{{CONTRACT_PRICE}}", String(CONTRACT_PRICE_USD))
+        .replaceAll("{{WATCH_PRICE}}", String(WATCH_PRICE_USD))
+        .replaceAll("{{WATCH_DAYS}}", String(WATCH_DAYS))
         .replaceAll("{{CHECK_MAX}}", String(CHECK_MAX_PACKAGES))
         .replaceAll("{{TOKEN}}", USDG.address)
         .replaceAll("{{MERCHANT}}", MERCHANT_WALLET || "(not configured)"), { "content-type": "text/markdown; charset=utf-8" });
@@ -752,6 +881,22 @@ const server = createServer(async (req, res) => {
       return handleCheck(req, res, body);
     }
 
+    if (req.method === "POST" && url.pathname === "/agent/watch") {
+      if (!MERCHANT_WALLET || !facilitator) return send(res, 503, { error: "payments not configured" });
+      if (rateLimited(ip, 60)) return send(res, 429, { error: "rate limited" });
+      let body;
+      try { body = await readBody(req, LOCKFILE_MAX_BYTES + 1e4); } catch { return send(res, 400, { error: "bad json" }); }
+      return handleWatch(req, res, body);
+    }
+
+    if ((req.method === "GET" || req.method === "DELETE") && url.pathname.startsWith("/agent/watch/")) {
+      const m = /^\/agent\/watch\/([0-9a-f-]{36})$/.exec(url.pathname);
+      const w = m && watches.get(m[1]);
+      if (!w || !agentAuthorized(req, w)) return send(res, 404, { error: "unknown watchId or wrong access token" });
+      if (req.method === "DELETE") return send(res, 200, watchView(watches.update(w.id, { status: "cancelled" })));
+      return send(res, 200, watchView(w));
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/agent/jobs/")) {
       const m = /^\/agent\/jobs\/([0-9a-f-]{36})(?:\/report\.(json|md|html))?$/.exec(url.pathname);
       if (!m) return send(res, 404, { error: "not found" });
@@ -797,6 +942,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
+watcher.start();
 server.listen(PORT, () => {
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
   console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG web · agents ${AGENT_SCAN_PRICE_USD} scan / ${CHECK_PRICE_USD} check`);
