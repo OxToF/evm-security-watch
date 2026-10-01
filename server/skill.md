@@ -8,7 +8,7 @@ Base URL: `{{BASE}}`
 
 | Request | Price | Pay with | Answer |
 |---|---|---|---|
-| `POST /agent/check` | **{{CHECK_PRICE}} USDC** | x402, USDC on Base | instant: advisories for up to {{CHECK_MAX}} npm packages at exact versions |
+| `POST /agent/check` | **{{CHECK_PRICE}} USDC** | x402, USDC on Base | instant: advisories for a whole `package-lock.json` / `yarn.lock`, or up to {{CHECK_MAX}} listed npm packages, at exact versions |
 | `POST /agent/scan` | **{{PRICE}} USDC** | x402, USDC on Base, or USDG on Robinhood Chain | a job: full scan of a public GitHub repo, report in about a minute |
 
 x402 prices sit under the $1 per-payment cap x402 clients ship with.
@@ -16,12 +16,24 @@ x402 prices sit under the $1 per-payment cap x402 clients ship with.
 ## Per-request check (`/agent/check`)
 
 Before adding or upgrading a dependency, or to triage a lockfile you already
-have: POST the pinned npm packages through your x402 client.
+have (private repos included): POST the pinned npm packages through your x402 client.
 
 ```sh
 POST {{BASE}}/agent/check
 {"packages":[{"name":"@openzeppelin/contracts","version":"4.8.0"},{"name":"solmate","version":"6.2.0"}]}
 ```
+
+Or send the whole lockfile as a string, same price:
+
+```sh
+POST {{BASE}}/agent/check
+{"lockfile":"<the text of package-lock.json or yarn.lock>"}
+```
+
+Only registry releases are checked: workspace links, `file:` and git
+dependencies are skipped, so a local package that shares a published name does
+not borrow its advisories. The answer then also carries `lockfile` (`type`,
+`packages` checked, `skipped`). Up to 2 MB and 5000 packages.
 
 The paid answer is **HTTP 200**: `checked`, `advisories` (id, affected
 `packages`, `severity`, `summary`, `url`) and `notCheckedCount`. Your payment

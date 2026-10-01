@@ -99,7 +99,7 @@ before(async () => {
       const sig = body.paymentPayload.payload.signature;
       res.writeHead(200, { "content-type": "application/json" });
       if (req.url === "/verify") return res.end(JSON.stringify(sig === "0xbad" ? { isValid: false, invalidReason: "invalid_exact_evm_payload_signature" } : { isValid: true, payer: PAYER }));
-      const settled = { "0xchk1": "0x" + "c".repeat(64), "0xchk2": "0x" + "d".repeat(64) }[sig] || X402_TX;
+      const settled = { "0xchk1": "0x" + "c".repeat(64), "0xchk2": "0x" + "d".repeat(64), "0xchk3": "0x" + "e".repeat(64) }[sig] || X402_TX;
       res.end(JSON.stringify(sig === "0xnosettle"
         ? { success: false, errorReason: "insufficient_funds", transaction: "", network: BASE_MAINNET }
         : { success: true, transaction: settled, network: BASE_MAINNET, payer: PAYER }));
@@ -111,9 +111,20 @@ before(async () => {
     let b = "";
     req.on("data", (c) => (b += c));
     req.on("end", () => {
+      if (osvDown) { res.writeHead(500); return res.end(); }
+      if (req.url === "/v1/querybatch") {
+        const { queries } = JSON.parse(b);
+        osvCalls.push({ batch: queries.map((q) => `${q.package.name}@${q.version}`) });
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ results: queries.map((q) => (q.package.name === "@openzeppelin/contracts" ? { vulns: [{ id: "GHSA-93hq-5wgc-jc82" }] } : {})) }));
+      }
+      if (req.url.startsWith("/v1/vulns/")) {
+        osvCalls.push({ vuln: req.url });
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ id: "GHSA-93hq-5wgc-jc82", aliases: ["CVE-2023-30542"], summary: "GovernorCompatibilityBravo may trim proposal calldata" }));
+      }
       const q = JSON.parse(b);
       osvCalls.push(q);
-      if (osvDown) { res.writeHead(500); return res.end(); }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(q.package.name === "@openzeppelin/contracts" ? { vulns: [{ id: "GHSA-93hq-5wgc-jc82", aliases: ["CVE-2023-30542"], summary: "GovernorCompatibilityBravo may trim proposal calldata" }] } : {}));
     });
@@ -127,6 +138,8 @@ before(async () => {
       PUBLIC_BASE_URL: base, RESEND_API_KEY: "",
       BASE_RPC_URL: `http://127.0.0.1:${baseRpc.address().port}`, FACILITATOR_URL: `http://127.0.0.1:${fac.address().port}`,
       OSV_QUERY_URL: `http://127.0.0.1:${osv.address().port}`,
+      OSV_BATCH_URL: `http://127.0.0.1:${osv.address().port}/v1/querybatch`,
+      OSV_VULNS_URL: `http://127.0.0.1:${osv.address().port}/v1/vulns`,
     },
     stdio: "ignore",
   });
@@ -322,4 +335,52 @@ test("per-request check on Base: instant answer, settled only once the answer ex
 
   assert.equal((await check({ packages }, pay("0xCHK1"))).status, 409);
   assert.equal((await check({ packages }, pay("0xchk2"))).status, 200);
+});
+
+test("/agent/check takes a whole package-lock.json or yarn.lock, registry packages only, in one batch", async () => {
+  const check = (body, header) => fetch(`${base}/agent/check`, {
+    method: "POST", headers: { "content-type": "application/json", ...(header ? { "payment-signature": header } : {}) }, body: JSON.stringify(body),
+  });
+  const npmLock = JSON.stringify({ name: "app", lockfileVersion: 3, packages: {
+    "": { name: "app" },
+    "node_modules/@openzeppelin/contracts": { version: "4.8.0", resolved: "https://registry.npmjs.org/@openzeppelin/contracts/-/contracts-4.8.0.tgz" },
+    "node_modules/solmate": { version: "6.2.0", resolved: "https://registry.npmjs.org/solmate/-/solmate-6.2.0.tgz" },
+    "node_modules/hardhat/node_modules/solmate": { version: "6.2.0", resolved: "https://registry.npmjs.org/solmate/-/solmate-6.2.0.tgz" },
+    // Ours, or not from the registry: not checked.
+    "node_modules/contracts": { resolved: "packages/contracts", link: true },
+    "node_modules/forge-std": { version: "1.9.0", resolved: "git+ssh://git@github.com/foundry-rs/forge-std.git#abc" },
+  } });
+  const yarnLock = [
+    "# yarn lockfile v1", "",
+    '"@openzeppelin/contracts@^4.8.0":', '  version "4.8.0"', '  resolved "https://registry.yarnpkg.com/x"', "",
+    "solmate@^6.2.0:", '  version "6.2.0"', "",
+  ].join("\n");
+
+  assert.equal((await check({ lockfile: "hello" })).status, 400);
+  assert.equal((await check({ lockfile: npmLock, packages: [{ name: "solmate", version: "6.2.0" }] })).status, 400);
+
+  const q = await check({ lockfile: npmLock });
+  assert.equal(q.status, 402);
+  const required = decodeHeader(q.headers.get("payment-required"));
+  const [req] = required.accepts;
+  assert.equal(req.amount, "10000"); // same price as a package list
+  assert.ok(required.extensions.bazaar.schema.properties.input.properties.body.properties.lockfile);
+  const pay = (signature) => encodeHeader({ x402Version: 2, resource: required.resource, accepted: req, payload: { signature, authorization: { from: PAYER, to: MERCHANT, value: req.amount } }, extensions: required.extensions });
+
+  osvCalls.length = 0;
+  const ok = await check({ lockfile: npmLock }, pay("0xchk3"));
+  assert.equal(ok.status, 200);
+  assert.deepEqual(osvCalls, [{ batch: ["@openzeppelin/contracts@4.8.0", "solmate@6.2.0"] }, { vuln: "/v1/vulns/GHSA-93hq-5wgc-jc82" }]);
+  const out = await ok.json();
+  assert.equal(out.checked, 2);
+  assert.deepEqual(out.lockfile, { type: "package-lock.json", packages: 2, skipped: 2 });
+  assert.equal(out.advisories.length, 1);
+  assert.equal(out.advisories[0].id, "GHSA-93hq-5wgc-jc82");
+
+  // yarn.lock is read too, and a batch the database does not answer settles nothing.
+  assert.equal((await check({ lockfile: yarnLock })).status, 402);
+  osvDown = true; facCalls.length = 0;
+  assert.equal((await check({ lockfile: yarnLock }, pay("0xchk4"))).status, 502);
+  assert.deepEqual(facCalls.map((c) => c.path), ["/verify"]);
+  osvDown = false;
 });
