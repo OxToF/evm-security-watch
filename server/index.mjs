@@ -26,6 +26,7 @@ import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
 import { verifyUsdgPayment, USDG, toBase, formatUnits } from "./verify.mjs";
 import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaarExtension } from "./x402.mjs";
+import { PayAIAuth } from "./payai-auth.mjs";
 import { inspectContract, isAddress } from "./contract.mjs";
 import { Watcher, checkWebhookUrl, newSecret, contractSnapshot, diffContract, lockfileSnapshot, diffLockfile } from "./watch.mjs";
 
@@ -72,7 +73,10 @@ if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Erro
 
 const store = new Store(JOBS_FILE);
 const watches = new Store(process.env.WATCHES_FILE || join(dirname(JOBS_FILE), "watches.json"));
-const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL });
+// Throws at boot when the key is half-set or malformed: PayAI refuses a bad key on
+// every payment instead of falling back to the free lane.
+const payaiAuth = PayAIAuth.fromEnv();
+const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL, auth: payaiAuth });
 // ERC-8004 identity, once registered on Base: the agentId minted by register().
 const ERC8004_REGISTRY = "eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432";
 const ERC8004_AGENT_ID = process.env.ERC8004_AGENT_ID ? Number(process.env.ERC8004_AGENT_ID) : null;
@@ -944,6 +948,7 @@ const server = createServer(async (req, res) => {
 
 watcher.start();
 server.listen(PORT, () => {
+  console.log(`[server] facilitator lane: ${payaiAuth ? `PayAI ${payaiAuth.label()}` : "public (no key)"}`);
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
   console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG web · agents ${AGENT_SCAN_PRICE_USD} scan / ${CHECK_PRICE_USD} check`);
   console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${rpcHost(RPC_URL)}`);
