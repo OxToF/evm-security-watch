@@ -1,4 +1,5 @@
-// x402 v2 over HTTP, settled by a facilitator (PayAI by default: free tier, no key).
+// x402 v2 over HTTP, settled by a facilitator (PayAI by default: free tier without
+// a key, paid lane with PAYAI_API_KEY_ID / PAYAI_API_KEY_SECRET, see payai-auth.mjs).
 //
 // Why a second rail next to USDG on Robinhood Chain: no x402 facilitator settles
 // on Robinhood Chain (chain 4663 is absent from PayAI's /supported), so an agent
@@ -29,15 +30,16 @@ export function decodeHeader(value) {
 }
 
 export class Facilitator {
-  constructor({ url, fetchImpl = globalThis.fetch }) {
+  constructor({ url, fetchImpl = globalThis.fetch, auth = null }) {
     this.url = url.replace(/\/$/, "");
     this.fetch = fetchImpl;
+    this.auth = auth; // PayAIAuth or null (public shared lane)
   }
 
   async _post(path, body) {
     const res = await this.fetch(`${this.url}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(this.auth ? this.auth.headers() : {}) },
       body: JSON.stringify(body),
     });
     const text = await res.text();
