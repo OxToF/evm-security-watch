@@ -73,9 +73,12 @@ if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Erro
 
 const store = new Store(JOBS_FILE);
 const watches = new Store(process.env.WATCHES_FILE || join(dirname(JOBS_FILE), "watches.json"));
-// Throws at boot when the key is half-set or malformed: PayAI refuses a bad key on
-// every payment instead of falling back to the free lane.
-const payaiAuth = PayAIAuth.fromEnv();
+// A bad key is never sent: PayAI refuses every payment that carries one. It is not
+// fatal either (on 2026-10-01 a masked secret took both apps down at boot): the
+// server stays up on the public lane and says so at boot and in /health.
+let payaiAuth = null, payaiAuthError = null;
+try { payaiAuth = PayAIAuth.fromEnv(); }
+catch (e) { payaiAuthError = e.message; }
 const facilitator = FACILITATOR_URL === "off" ? null : new Facilitator({ url: FACILITATOR_URL, auth: payaiAuth });
 // ERC-8004 identity, once registered on Base: the agentId minted by register().
 const ERC8004_REGISTRY = "eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432";
@@ -776,7 +779,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, "");
 
   try {
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, facilitatorLane: payaiAuth ? "payai" : payaiAuthError ? "public-key-ignored" : "public" });
 
     if (req.method === "GET" && url.pathname === "/" && LANDING) {
       return send(res, 200, LANDING, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
@@ -948,7 +951,8 @@ const server = createServer(async (req, res) => {
 
 watcher.start();
 server.listen(PORT, () => {
-  console.log(`[server] facilitator lane: ${payaiAuth ? `PayAI ${payaiAuth.label()}` : "public (no key)"}`);
+  console.log(`[server] facilitator lane: ${payaiAuth ? `PayAI ${payaiAuth.label()}` : payaiAuthError ? "public, PAYAI KEY IGNORED" : "public (no key)"}`);
+  if (payaiAuthError) console.error(`[server] ERROR PayAI key ignored: ${payaiAuthError}`);
   console.log(`[server] EVM Watchdog scan backend on :${PORT}`);
   console.log(`[server] admin ${ADMIN_TOKEN ? "enabled" : "DISABLED (set ADMIN_TOKEN)"} · email ${process.env.RESEND_API_KEY ? "Resend" : "DEV mode (disk)"} · price ${PRICE_USD} USDG web · agents ${AGENT_SCAN_PRICE_USD} scan / ${CHECK_PRICE_USD} check`);
   console.log(`[server] payments ${MERCHANT_WALLET ? "on -> " + MERCHANT_WALLET : "OFF (set MERCHANT_WALLET)"} · chain ${USDG.chainId} · rpc ${rpcHost(RPC_URL)}`);

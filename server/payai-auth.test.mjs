@@ -4,7 +4,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, verify } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PayAIAuth } from "./payai-auth.mjs";
@@ -49,10 +51,35 @@ test("a misconfiguration fails at boot, never at the first payment", () => {
   // Without the prefix works too.
   assert.ok(PayAIAuth.fromEnv({ PAYAI_API_KEY_ID: "k", PAYAI_API_KEY_SECRET: SECRET.slice(9) }));
 
+});
+
+// 2026-10-01: a masked secret (payai_sk_•••) took both apps down at boot. A bad key
+// must keep the server up, on the public lane, without ever sending the key.
+test("a bad key does not take the server down: public lane, error at boot and in /health", async () => {
   const server = join(dirname(fileURLToPath(import.meta.url)), "index.mjs");
-  const r = spawnSync(process.execPath, [server], { env: { ...process.env, PORT: "0", PAYAI_API_KEY_ID: "k", PAYAI_API_KEY_SECRET: "" }, encoding: "utf8", timeout: 10_000 });
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /both PAYAI_API_KEY_ID and PAYAI_API_KEY_SECRET/);
+  const port = 19500 + Math.floor(Math.random() * 400);
+  const dir = mkdtempSync(join(tmpdir(), "payai-boot-"));
+  const run = (extra) => spawn(process.execPath, [server], { env: { ...process.env, PORT: String(port), JOBS_FILE: join(dir, "jobs.json"), ...extra }, stdio: ["ignore", "pipe", "pipe"] });
+  for (const [extra, lane] of [
+    [{ PAYAI_API_KEY_ID: "k", PAYAI_API_KEY_SECRET: "payai_sk_" + "\u2022".repeat(64) }, "public-key-ignored"],
+    [{ PAYAI_API_KEY_ID: "k" }, "public-key-ignored"],
+    [{ PAYAI_API_KEY_ID: "k", PAYAI_API_KEY_SECRET: SECRET }, "payai"],
+    [{}, "public"],
+  ]) {
+    const p = run(extra);
+    let err = "", out = "";
+    p.stderr.on("data", (d) => (err += d));
+    p.stdout.on("data", (d) => (out += d));
+    let health = null;
+    for (let i = 0; i < 50 && !health; i++) {
+      try { health = await (await fetch(`http://127.0.0.1:${port}/health`)).json(); } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    p.kill();
+    await new Promise((r) => p.on("exit", r));
+    assert.equal(health && health.facilitatorLane, lane, JSON.stringify(extra).slice(0, 60));
+    if (lane === "public-key-ignored") assert.match(err, /PayAI key ignored/);
+    assert.ok(!out.includes(SECRET.slice(9, 40)) && !err.includes(SECRET.slice(9, 40)), "secret must never be logged");
+  }
 });
 
 test("the facilitator sends the token on every call when keyed, and nothing when not", async () => {
