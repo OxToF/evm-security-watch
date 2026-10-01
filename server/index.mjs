@@ -319,7 +319,7 @@ function x402Required(error = "PAYMENT-SIGNATURE header is required") {
     error,
     resource: {
       url: `${PUBLIC_BASE}/agent/scan`,
-      description: "EVM Watchdog: npm/Foundry dependency advisories split by on-chain vs toolchain surface, plus known Solidity bug-class leads, for a public GitHub repo. A scan, not an audit.",
+      description: "Use this before releasing or integrating Solidity code from a public GitHub repo (Foundry or Hardhat): advisories on its exact pinned npm, soldeer and submodule dependencies, split into on-chain vs toolchain, and leads for known Solidity bug classes with file:line. A scan, not an audit.",
       mimeType: "application/json",
       serviceName: "EVM Watchdog",
       tags: ["security", "solidity", "evm", "dependencies", "code-scan"],
@@ -454,7 +454,7 @@ function checkRequired(error = "PAYMENT-SIGNATURE header is required") {
     error,
     resource: {
       url: `${PUBLIC_BASE}/agent/check`,
-      description: `EVM Watchdog advisory check: GitHub/OSV advisories affecting the packages of a whole package-lock.json or yarn.lock (or up to ${CHECK_MAX_PACKAGES} listed npm packages) at their exact pinned versions. Instant, per request.`,
+      description: `Use this before adding or upgrading an npm dependency (OpenZeppelin, solmate, hardhat…), or to triage a lockfile: GitHub/OSV advisories affecting a whole package-lock.json or yarn.lock (or up to ${CHECK_MAX_PACKAGES} listed packages) at their exact pinned versions. Instant, per request.`,
       mimeType: "application/json",
       serviceName: "EVM Watchdog check",
       tags: ["security", "solidity", "npm", "advisories", "dependencies"],
