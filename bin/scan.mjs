@@ -11,7 +11,7 @@ import { join, relative, sep } from "node:path";
 import { normalize } from "./collect.mjs";
 import { resolveSubmodules, parseSoldeerLock, readRemappings, productionImports, isTestOrScript, pragmaExcludes08, configuredSolc, TEST_ONLY_PACKAGES } from "./deps.mjs";
 
-const OSV_QUERY = "https://api.osv.dev/v1/query";
+const OSV_QUERY = process.env.OSV_QUERY_URL || "https://api.osv.dev/v1/query";
 
 export function parseGithubUrl(input) {
   const m = String(input).trim().match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
@@ -106,7 +106,7 @@ export function triageAdvisories(advisories, onchainNames) {
   return { onchain, toolchain };
 }
 
-async function scanDependencies(deps, fetchImpl, log) {
+export async function scanDependencies(deps, fetchImpl, log = () => {}) {
   const seen = new Set(), uniq = [];
   for (const c of deps) { const k = `${c.name}@${c.version}`; if (!seen.has(k)) { seen.add(k); uniq.push(c); } }
   log(`[scan] ${uniq.length} unique pinned npm packages -> querying OSV (version-filtered)`);

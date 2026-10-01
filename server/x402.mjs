@@ -56,21 +56,13 @@ export class Facilitator {
   }
 }
 
-// The `bazaar` extension: what a discovery catalog shows an agent about this
-// endpoint. Same-document JSON Schema only (the spec forbids external $ref).
-export function bazaarExtension({ exampleRepo, base }) {
+// The `bazaar` extension: what a discovery catalog shows an agent about one
+// POST endpoint. Same-document JSON Schema only (the spec forbids external $ref).
+export function bazaarExtension({ exampleBody, properties, required, outputExample }) {
   return {
     info: {
-      input: { type: "http", method: "POST", bodyType: "json", body: { repo: exampleRepo } },
-      output: {
-        type: "json",
-        example: {
-          jobId: "8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e",
-          status: "paid",
-          accessToken: "<shown once, send as Authorization: Bearer>",
-          statusUrl: `${base}/agent/jobs/8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e`,
-        },
-      },
+      input: { type: "http", method: "POST", bodyType: "json", body: exampleBody },
+      output: { type: "json", example: outputExample },
     },
     schema: {
       $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -82,14 +74,7 @@ export function bazaarExtension({ exampleRepo, base }) {
             type: { type: "string", const: "http" },
             method: { type: "string", enum: ["POST"] },
             bodyType: { type: "string", enum: ["json"] },
-            body: {
-              type: "object",
-              properties: {
-                repo: { type: "string", description: "Public GitHub repository URL, https://github.com/<owner>/<repo>" },
-                email: { type: "string", description: "Optional. Also email the report here." },
-              },
-              required: ["repo"],
-            },
+            body: { type: "object", properties, required },
           },
           required: ["type", "method", "bodyType", "body"],
           additionalProperties: false,

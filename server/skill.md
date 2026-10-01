@@ -1,16 +1,37 @@
-# EVM Watchdog: scan a Solidity repo, paid per call (USDC on Base or USDG on Robinhood Chain)
+# EVM Watchdog: security checks for Solidity code, paid per request
 
-You are an agent. This page tells you how to buy one security scan of a public
-Solidity GitHub repository (Foundry or Hardhat), pay for it yourself, and read
-the report. Two ways to pay: **x402 with USDC on Base** (below, the fastest) or
-a plain **USDG transfer on Robinhood Chain** (steps 1 to 4). No account, no API
-key, no email needed.
+You are an agent. This page tells you how to buy security checks of Solidity
+code, pay for them yourself, and read the result. No account, no API key, no
+email needed.
 
 Base URL: `{{BASE}}`
-Price: **about {{PRICE}} USDG** per scan. Each quote has a unique amount a few
-micro-USDG above the price; pay that exact amount.
 
-## What you get
+| Request | Price | Pay with | Answer |
+|---|---|---|---|
+| `POST /agent/check` | **{{CHECK_PRICE}} USDC** | x402, USDC on Base | instant: advisories for up to {{CHECK_MAX}} npm packages at exact versions |
+| `POST /agent/scan` | **{{PRICE}} USDC** | x402, USDC on Base, or USDG on Robinhood Chain | a job: full scan of a public GitHub repo, report in about a minute |
+
+x402 prices sit under the $1 per-payment cap x402 clients ship with.
+
+## Per-request check (`/agent/check`)
+
+Before adding or upgrading a dependency, or to triage a lockfile you already
+have: POST the pinned npm packages through your x402 client.
+
+```sh
+POST {{BASE}}/agent/check
+{"packages":[{"name":"@openzeppelin/contracts","version":"4.8.0"},{"name":"solmate","version":"6.2.0"}]}
+```
+
+The paid answer is **HTTP 200**: `checked`, `advisories` (id, affected
+`packages`, `severity`, `summary`, `url`) and `notCheckedCount`. Your payment
+is verified first and settled only once the answer exists: if the lookup fails,
+you are not charged. It lists known advisories for those versions; it does not
+tell you whether your contracts reach the vulnerable code. For a Foundry repo
+whose libraries are git submodules, use the full scan: it resolves their
+versions for you.
+
+## Full scan (`/agent/scan`): what you get
 
 - Advisories that affect the **exact versions pinned** by the repo: npm
   lockfiles, `soldeer.lock`, and Foundry git submodules (version read at the
@@ -30,7 +51,7 @@ certify the absence of bugs. Say so when you pass the result on.
 ## Before you pay
 
 This costs real money. **Ask your human before you pay**, unless they have
-already told you that you may spend on scans. Never ask anyone for a private key
+given you a budget for these requests. Never ask anyone for a private key
 or seed phrase, and never send one anywhere: nothing here needs one.
 
 ## Fastest path: any x402 v2 client, USDC on Base
@@ -43,10 +64,6 @@ exactly {{PRICE}} USDC on Base (`eip155:8453`, token
 USDC authorization, the facilitator submits it and pays the gas. The paid
 answer is **HTTP 200** with `jobId`, `accessToken` (**shown once, save it**) and
 `statusUrl`. Then go to step 4.
-
-Most x402 clients cap one payment at a small amount by default (`@x402/fetch`:
-$1). This scan costs {{PRICE}} USDC, so raise the cap for this one call, and
-only with your human's approval.
 
 Without an x402 client, pay in USDG on Robinhood Chain with steps 1 to 4.
 
