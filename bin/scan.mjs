@@ -12,6 +12,8 @@ import { normalize } from "./collect.mjs";
 import { resolveSubmodules, parseSoldeerLock, readRemappings, productionImports, isTestOrScript, pragmaExcludes08, configuredSolc, TEST_ONLY_PACKAGES } from "./deps.mjs";
 
 const OSV_QUERY = process.env.OSV_QUERY_URL || "https://api.osv.dev/v1/query";
+const OSV_BATCH = process.env.OSV_BATCH_URL || "https://api.osv.dev/v1/querybatch";
+const OSV_VULNS = process.env.OSV_VULNS_URL || "https://api.osv.dev/v1/vulns";
 
 export function parseGithubUrl(input) {
   const m = String(input).trim().match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
@@ -125,6 +127,76 @@ export async function scanDependencies(deps, fetchImpl, log = () => {}) {
     for (const r of results) { if (r.vulns === null) failures++; else if (r.vulns.length) rawByPkg.push([`${r.c.name} ${r.c.version}`, r.vulns]); }
   }
   return { advisories: normalize(rawByPkg), failures };
+}
+
+// A pasted lockfile (agent check): package-lock.json v1/v2/v3 or yarn.lock v1/berry.
+// Registry releases only: workspace links, file: and git deps carry no npm advisory
+// of their own, and a local package that shares a published name would borrow its.
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+export function parseLockfileText(text) {
+  const t = text.trimStart();
+  let type, raw, skipped = 0;
+  if (t.startsWith("{")) {
+    let json; try { json = JSON.parse(t); } catch { return null; }
+    if (!json || (!json.packages && !json.dependencies) || !json.lockfileVersion) return null;
+    type = "package-lock.json";
+    raw = [];
+    if (json.packages) {
+      for (const [k, v] of Object.entries(json.packages)) {
+        const idx = k.lastIndexOf("node_modules/");
+        if (idx === -1 || !v) continue;
+        // Workspace links, file: and git+ deps.
+        if (v.link || !v.version || (v.resolved && !/^https?:\/\//.test(v.resolved))) { skipped++; continue; }
+        raw.push({ name: k.slice(idx + "node_modules/".length), version: v.version });
+      }
+    } else raw = parsePackageLock(t);
+  } else if (/^# yarn lockfile v1|^__metadata:/m.test(t)) {
+    type = "yarn.lock";
+    const blocks = text.split(/\n(?=\S)/).filter((b) => /\n\s+version:?\s/.test("\n" + b.split("\n").slice(1).join("\n")));
+    const local = (b) => /@(?:workspace|file|link|portal|patch|git|github):/.test(b.split("\n")[0]);
+    skipped = blocks.filter(local).length;
+    raw = blocks.filter((b) => !local(b)).flatMap((b) => parseYarnLock("\n" + b));
+  } else return null;
+  const ok = raw.filter((p) => SEMVER.test(p.version));
+  skipped += new Set(raw.filter((p) => !SEMVER.test(p.version)).map((p) => `${p.name}@${p.version}`)).size;
+  const packages = [...new Map(ok.map((p) => [`${p.name}@${p.version}`, p])).values()];
+  return { type, packages, skipped };
+}
+
+// Same answer as scanDependencies, for a whole lockfile: one OSV batch request per
+// thousand packages instead of one request each, then the details of each distinct
+// advisory once. A batch that fails counts all of its packages as not checked.
+export async function scanDependenciesBatch(pkgs, fetchImpl) {
+  const uniq = [...new Map(pkgs.map((p) => [`${p.name}@${p.version}`, p])).values()];
+  const idsByPkg = [];
+  let failures = 0;
+  for (let i = 0; i < uniq.length; i += 1000) {
+    const chunk = uniq.slice(i, i + 1000);
+    let results;
+    try {
+      const res = await fetchImpl(OSV_BATCH, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ queries: chunk.map((c) => ({ package: { ecosystem: "npm", name: c.name }, version: c.version })) }),
+      });
+      results = res.ok ? (await res.json()).results : null;
+    } catch { results = null; }
+    if (!Array.isArray(results) || results.length !== chunk.length) { failures += chunk.length; continue; }
+    chunk.forEach((c, j) => {
+      const ids = (results[j].vulns || []).map((v) => v.id);
+      if (ids.length) idsByPkg.push([`${c.name} ${c.version}`, ids]);
+    });
+  }
+  const details = new Map();
+  const ids = [...new Set(idsByPkg.flatMap(([, v]) => v))];
+  for (let i = 0; i < ids.length; i += 8) {
+    await Promise.all(ids.slice(i, i + 8).map(async (id) => {
+      try {
+        const res = await fetchImpl(`${OSV_VULNS}/${encodeURIComponent(id)}`);
+        details.set(id, res.ok ? await res.json() : { id });
+      } catch { details.set(id, { id }); }
+    }));
+  }
+  return { advisories: normalize(idsByPkg.map(([k, v]) => [k, v.map((id) => details.get(id))])), failures };
 }
 
 // High-signal Solidity leads mapped to skill/vuln-classes.md. Leads, not findings.

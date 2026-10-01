@@ -20,7 +20,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runScan, parseGithubUrl, WATCHDOG_LOGO, fixMailto, scanDependencies } from "../bin/scan.mjs";
+import { runScan, parseGithubUrl, WATCHDOG_LOGO, fixMailto, scanDependencies, scanDependenciesBatch, parseLockfileText } from "../bin/scan.mjs";
 import { Store } from "./store.mjs";
 import { Queue } from "./queue.mjs";
 import { sendReport } from "./email.mjs";
@@ -36,6 +36,9 @@ const PRICE_USD = Number(process.env.SCAN_PRICE_USD || 69); // web: a human, a b
 const AGENT_SCAN_PRICE_USD = Number(process.env.AGENT_SCAN_PRICE_USD || 0.5);
 const CHECK_PRICE_USD = Number(process.env.CHECK_PRICE_USD || 0.01);
 const CHECK_MAX_PACKAGES = 100;
+// A whole lockfile instead of a list: one OSV batch call, so the size barely costs us.
+const LOCKFILE_MAX_BYTES = 2_000_000;
+const LOCKFILE_MAX_PACKAGES = 5000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 const MERCHANT_WALLET = process.env.MERCHANT_WALLET ? process.env.MERCHANT_WALLET.toLowerCase() : null;
@@ -87,10 +90,10 @@ function send(res, code, body, extraHeaders = {}) {
   res.end(payload);
 }
 
-function readBody(req) {
+function readBody(req, max = 1e5) {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (c) => { data += c; if (data.length > 1e5) req.destroy(); });
+    req.on("data", (c) => { data += c; if (data.length > max) req.destroy(); });
     req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error("bad json")); } });
     req.on("error", reject);
   });
@@ -383,17 +386,35 @@ const CHECK_BAZAAR = bazaarExtension({
   properties: {
     packages: {
       type: "array", minItems: 1, maxItems: CHECK_MAX_PACKAGES,
-      description: "npm packages at the exact versions pinned in the lockfile (OpenZeppelin, solmate, Uniswap, Chainlink, hardhat…)",
+      description: "npm packages at the exact versions pinned in the lockfile (OpenZeppelin, solmate, Uniswap, Chainlink, hardhat…). Send this OR lockfile.",
       items: { type: "object", properties: { name: { type: "string" }, version: { type: "string" } }, required: ["name", "version"] },
     },
+    lockfile: {
+      type: "string", maxLength: LOCKFILE_MAX_BYTES,
+      description: `The raw text of a package-lock.json or yarn.lock (up to ${LOCKFILE_MAX_PACKAGES} registry packages; workspace, file and git deps are skipped). Send this OR packages.`,
+    },
   },
-  required: ["packages"],
   outputExample: {
     checked: 1,
     advisories: [{ id: "GHSA-93hq-5wgc-jc82", packages: ["@openzeppelin/contracts 4.8.0"], severity: "HIGH", summary: "GovernorCompatibilityBravo may trim proposal calldata", url: "https://github.com/advisories/GHSA-93hq-5wgc-jc82" }],
     notCheckedCount: 0,
   },
 });
+
+// Either {packages} or {lockfile}. Returns the packages and, for a lockfile, what was read.
+function parseCheckInput(body) {
+  if (body && body.lockfile !== undefined) {
+    if (body.packages !== undefined) throw new Error("send packages OR lockfile, not both");
+    if (typeof body.lockfile !== "string") throw new Error("lockfile must be the text of a package-lock.json or yarn.lock");
+    if (body.lockfile.length > LOCKFILE_MAX_BYTES) throw new Error(`lockfile is over ${LOCKFILE_MAX_BYTES} bytes`);
+    const lf = parseLockfileText(body.lockfile);
+    if (!lf) throw new Error("lockfile must be the text of a package-lock.json or yarn.lock");
+    if (!lf.packages.length) throw new Error("no registry package in this lockfile");
+    if (lf.packages.length > LOCKFILE_MAX_PACKAGES) throw new Error(`lockfile has over ${LOCKFILE_MAX_PACKAGES} registry packages`);
+    return { packages: lf.packages, lockfile: { type: lf.type, packages: lf.packages.length, skipped: lf.skipped } };
+  }
+  return { packages: parsePackages(body) };
+}
 
 function parsePackages(body) {
   const pk = body && body.packages;
@@ -415,7 +436,7 @@ function checkRequired(error = "PAYMENT-SIGNATURE header is required") {
     error,
     resource: {
       url: `${PUBLIC_BASE}/agent/check`,
-      description: `EVM Watchdog advisory check: GitHub/OSV advisories affecting up to ${CHECK_MAX_PACKAGES} npm packages at their exact pinned versions. Instant, per request.`,
+      description: `EVM Watchdog advisory check: GitHub/OSV advisories affecting the packages of a whole package-lock.json or yarn.lock (or up to ${CHECK_MAX_PACKAGES} listed npm packages) at their exact pinned versions. Instant, per request.`,
       mimeType: "application/json",
       serviceName: "EVM Watchdog check",
       tags: ["security", "solidity", "npm", "advisories", "dependencies"],
@@ -426,8 +447,8 @@ function checkRequired(error = "PAYMENT-SIGNATURE header is required") {
 }
 
 async function handleCheck(req, res, body) {
-  let packages;
-  try { packages = parsePackages(body); } catch (e) { return send(res, 400, { error: e.message }); }
+  let packages, lockfile;
+  try { ({ packages, lockfile } = parseCheckInput(body)); } catch (e) { return send(res, 400, { error: e.message }); }
   const quote = (error) => ({ "payment-required": encodeHeader(checkRequired(error)) });
   const header = req.headers["payment-signature"];
   if (!header) return send(res, 402, { error: "payment_required", priceUsdc: CHECK_PRICE_USD, x402: "USDC on Base. Requirements are in the PAYMENT-REQUIRED header; resend with PAYMENT-SIGNATURE.", manual: `${PUBLIC_BASE}/skill.md` }, quote());
@@ -450,7 +471,7 @@ async function handleCheck(req, res, body) {
       return send(res, 402, { error }, quote(error));
     }
     const uniq = [...new Map(packages.map((p) => [`${p.name}@${p.version}`, p])).values()];
-    const deps = await scanDependencies(uniq, globalThis.fetch);
+    const deps = lockfile ? await scanDependenciesBatch(uniq, globalThis.fetch) : await scanDependencies(uniq, globalThis.fetch);
     if (deps.failures === uniq.length) return send(res, 502, { error: "advisory database unreachable, nothing charged; try again" });
     let s;
     try { s = await facilitator.settle(payload, reqs); }
@@ -472,6 +493,7 @@ async function handleCheck(req, res, body) {
       checked: uniq.length - deps.failures,
       advisories: deps.advisories,
       notCheckedCount: deps.failures, // packages the advisory database did not answer for: check them again
+      ...(lockfile ? { lockfile } : {}),
       tx: `https://basescan.org/tx/${h}`,
       disclaimer: "Known advisories for these exact versions. Not an audit of the code that uses them.",
     }, { "payment-response": encodeHeader(s) });
@@ -627,7 +649,9 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/agent/check") {
       if (!MERCHANT_WALLET || !facilitator) return send(res, 503, { error: "payments not configured" });
       if (rateLimited(ip, 120)) return send(res, 429, { error: "rate limited" });
-      return handleCheck(req, res, await readBody(req));
+      let body;
+      try { body = await readBody(req, LOCKFILE_MAX_BYTES + 1e4); } catch { return send(res, 400, { error: "bad json" }); }
+      return handleCheck(req, res, body);
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/agent/jobs/")) {
