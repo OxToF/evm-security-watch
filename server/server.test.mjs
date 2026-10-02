@@ -10,6 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyFromReceipt, USDG, TRANSFER_TOPIC, formatUnits, toBase } from "./verify.mjs";
 import { Store } from "./store.mjs";
+import { routeOf } from "./traffic.mjs";
 import { encodeHeader, decodeHeader, BASE_MAINNET, BASE_USDC } from "./x402.mjs";
 
 const MERCHANT = "0x0e659996c75dcb352e95e130d79831e3e2fa82a8";
@@ -140,7 +141,7 @@ before(async () => {
       ...process.env, PORT: String(port), JOBS_FILE: join((testDir = mkdtempSync(join(tmpdir(), "evmw-e2e-"))), "jobs.json"),
       WATCH_ALLOW_PRIVATE_WEBHOOKS: "1", WATCH_TICK_MS: "100", WATCH_INTERVAL_MS: "0",
       MERCHANT_WALLET: MERCHANT, EVM_RPC_URL: `http://127.0.0.1:${rpc.address().port}`, SCAN_PRICE_USD: "69",
-      PUBLIC_BASE_URL: base, RESEND_API_KEY: "",
+      PUBLIC_BASE_URL: base, RESEND_API_KEY: "", ADMIN_TOKEN: "test-admin",
       BASE_RPC_URL: `http://127.0.0.1:${baseRpc.address().port}`, FACILITATOR_URL: `http://127.0.0.1:${fac.address().port}`,
       OSV_QUERY_URL: `http://127.0.0.1:${osv.address().port}`,
       OSV_BATCH_URL: `http://127.0.0.1:${osv.address().port}/v1/querybatch`,
@@ -473,3 +474,22 @@ test("/agent/watch: created only once paid, signed webhook on a new advisory, re
   }
 });
 
+test("traffic log: who called and where they stopped, with no id, token or IP in it", async () => {
+  assert.equal(routeOf("/r/8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e/AbCdEfGhIjKlMnOpQrStUv"), "/r/:id/:token");
+  assert.equal(routeOf("/agent/jobs/8f0c6a2e-1b7d-4c1e-9d3a-2f5e6b7c8d9e/report.md"), "/agent/jobs/:id/report.md");
+
+  assert.equal((await fetch(`${base}/admin/traffic`)).status, 401);
+  const auth = { authorization: "Bearer test-admin" };
+  // The log line is written on "finish": give the last responses a moment.
+  await new Promise((r) => setTimeout(r, 100));
+  const sum = await (await fetch(`${base}/admin/traffic?hours=1`, { headers: auth })).json();
+  assert.ok(sum.total > 0);
+  assert.ok(sum.agentFunnel.quoted >= 1, "the 402 quotes of the earlier tests are counted");
+  assert.ok(sum.routes["POST /agent/scan"]?.["402"] >= 1);
+  assert.equal(Object.keys(sum.routes).some((k) => k.includes("/health")), false);
+
+  const raw = readFileSync(join(testDir, "traffic.jsonl"), "utf8");
+  assert.doesNotMatch(raw, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  assert.doesNotMatch(raw, /127\.0\.0\.1|::1/);
+  assert.doesNotMatch(raw, /Bearer/);
+});

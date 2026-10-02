@@ -27,6 +27,7 @@ import { sendReport } from "./email.mjs";
 import { verifyUsdgPayment, USDG, toBase, formatUnits } from "./verify.mjs";
 import { Facilitator, BASE_MAINNET, BASE_USDC, encodeHeader, decodeHeader, bazaarExtension } from "./x402.mjs";
 import { PayAIAuth } from "./payai-auth.mjs";
+import { Traffic } from "./traffic.mjs";
 import { inspectContract, isAddress } from "./contract.mjs";
 import { Watcher, checkWebhookUrl, newSecret, contractSnapshot, diffContract, lockfileSnapshot, diffLockfile } from "./watch.mjs";
 
@@ -73,6 +74,7 @@ if (MERCHANT_WALLET && !/^0x[0-9a-f]{40}$/.test(MERCHANT_WALLET)) throw new Erro
 
 const store = new Store(JOBS_FILE);
 const watches = new Store(process.env.WATCHES_FILE || join(dirname(JOBS_FILE), "watches.json"));
+const traffic = new Traffic(process.env.TRAFFIC_FILE || join(dirname(JOBS_FILE), "traffic.jsonl"));
 // A bad key is never sent: PayAI refuses every payment that carries one. It is not
 // fatal either (on 2026-10-01 a masked secret took both apps down at boot): the
 // server stays up on the public lane and says so at boot and in /health.
@@ -776,6 +778,7 @@ function rpcHost(u) { try { return new URL(u).host; } catch { return "(unparseab
 const server = createServer(async (req, res) => {
   const ip = req.headers["fly-client-ip"] || req.socket.remoteAddress || "?";
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  traffic.watch(req, res, ip);
   if (req.method === "OPTIONS") return send(res, 204, "");
 
   try {
@@ -936,6 +939,14 @@ const server = createServer(async (req, res) => {
       // never leak the email or an agent job's token hash on a public endpoint
       const { email, accessTokenHash, viewTokenHash, ...safe } = job;
       return send(res, 200, safe);
+    }
+
+    // Who called, where they stopped: GET /admin/traffic?hours=24
+    if (req.method === "GET" && url.pathname === "/admin/traffic") {
+      if (!ADMIN_TOKEN || (req.headers.authorization || "") !== `Bearer ${ADMIN_TOKEN}`)
+        return send(res, 401, { error: "unauthorized" });
+      const hours = Number(url.searchParams.get("hours")) || 24;
+      return send(res, 200, traffic.summary(Date.now() - hours * 3600_000));
     }
 
     if (req.method === "GET" && url.pathname === "/admin/jobs") {
