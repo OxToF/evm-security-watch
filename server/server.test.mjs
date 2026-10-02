@@ -493,3 +493,54 @@ test("traffic log: who called and where they stopped, with no id, token or IP in
   assert.doesNotMatch(raw, /127\.0\.0\.1|::1/);
   assert.doesNotMatch(raw, /Bearer/);
 });
+
+test("discovery: probes get the 402 terms, never a 404 or 400, and nothing is created or verified", async () => {
+  const jobs = () => existsSync(join(testDir, "jobs.json")) ? Object.keys(JSON.parse(readFileSync(join(testDir, "jobs.json"), "utf8"))).length : 0;
+  const jobsBefore = jobs();
+  // Its own client addresses: the rate limit buckets are per client, all routes together.
+  const h = { "content-type": "application/json", "fly-client-ip": "198.51.100.7" };
+  const prices = { "/agent/contract": "50000", "/agent/check": "10000", "/agent/scan": "500000", "/agent/watch": "900000" };
+  for (const [path, amount] of Object.entries(prices)) {
+    for (const [method, body] of [["GET"], ["HEAD"], ["POST", "{}"], ["POST", ""]]) {
+      const r = await fetch(`${base}${path}`, { method, headers: h, body });
+      assert.equal(r.status, 402, `${method} ${path} ${JSON.stringify(body)}`);
+      const req = decodeHeader(r.headers.get("payment-required"));
+      assert.equal(req.x402Version, 2);
+      assert.equal(req.accepts[0].network, BASE_MAINNET);
+      assert.equal(req.accepts[0].amount, amount, `${method} ${path}`);
+      assert.equal(req.accepts[0].payTo.toLowerCase(), MERCHANT);
+      assert.ok(req.extensions.bazaar.info.input.body, "the example body is in the terms");
+      if (method !== "HEAD") assert.match((await r.json()).howTo, new RegExp(`POST ${base}${path}`));
+    }
+  }
+  assert.equal(jobs(), jobsBefore, "a probe creates no quote");
+
+  // A malformed body is still a 400: only an empty one is a probe.
+  assert.equal((await fetch(`${base}/agent/contract`, { method: "POST", headers: h, body: JSON.stringify({ address: "nope" }) })).status, 400);
+
+  // Paying a probe's terms without a real body never reaches the facilitator.
+  const calls = facCalls.length;
+  const accepted = decodeHeader((await fetch(`${base}/agent/scan`, { method: "GET", headers: h })).headers.get("payment-required")).accepts[0];
+  const sig = encodeHeader({ x402Version: 2, accepted, payload: { signature: "0x" + "ab".repeat(65), authorization: {} } });
+  for (const path of Object.keys(prices)) {
+    const r = await fetch(`${base}${path}`, { method: "POST", headers: { ...h, "fly-client-ip": "198.51.100.8", "payment-signature": sig }, body: "{}" });
+    assert.ok([400, 402].includes(r.status), `${path} answered ${r.status}`);
+  }
+  assert.equal(facCalls.length, calls, "nothing verified or settled");
+});
+
+test("discovery documents: /.well-known/x402, /openapi.json, /llms.txt, /robots.txt", async () => {
+  const d = await (await fetch(`${base}/.well-known/x402`)).json();
+  assert.equal(d.x402Version, 2);
+  assert.deepEqual(d.resources.map((u) => u.replace(base, "")), ["/agent/contract", "/agent/check", "/agent/scan", "/agent/watch"]);
+  assert.deepEqual(d.services.map((s) => s.priceUsdc), [0.05, 0.01, 0.5, 0.9]);
+  assert.ok(d.services.every((s) => s.payTo.toLowerCase() === MERCHANT && s.network === BASE_MAINNET && s.asset === BASE_USDC.address && s.input.example));
+  const o = await (await fetch(`${base}/openapi.json`)).json();
+  assert.equal(o.openapi, "3.1.0");
+  assert.deepEqual(Object.keys(o.paths), ["/agent/contract", "/agent/check", "/agent/scan", "/agent/watch"]);
+  assert.equal(o.paths["/agent/contract"].post["x-x402"].priceUsdc, 0.05);
+  const l = await fetch(`${base}/llms.txt`);
+  assert.match(l.headers.get("content-type"), /text\/plain/);
+  assert.match(await l.text(), /POST .*\/agent\/contract, \$0\.05 USDC/);
+  assert.match(await (await fetch(`${base}/robots.txt`)).text(), /Disallow: \/admin\//);
+});
