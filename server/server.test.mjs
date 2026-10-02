@@ -544,3 +544,26 @@ test("discovery documents: /.well-known/x402, /openapi.json, /llms.txt, /robots.
   assert.match(await l.text(), /POST .*\/agent\/contract, \$0\.05 USDC/);
   assert.match(await (await fetch(`${base}/robots.txt`)).text(), /Disallow: \/admin\//);
 });
+
+test("a 400 on a placeholder or broken body still carries the terms; a paid attempt does not", async () => {
+  const h = { "content-type": "application/json", "fly-client-ip": "198.51.100.9" };
+  const cases = [
+    ["/agent/contract", JSON.stringify({ address: "string" }), "50000"],
+    ["/agent/scan", JSON.stringify({ repo: "string" }), "500000"],
+    ["/agent/watch", JSON.stringify({ webhook: "string", address: "string" }), "900000"],
+    ["/agent/check", "{not json", "10000"],
+  ];
+  for (const [path, body, amount] of cases) {
+    const r = await fetch(`${base}${path}`, { method: "POST", headers: h, body });
+    assert.equal(r.status, 400, path);
+    const t = decodeHeader(r.headers.get("payment-required"));
+    assert.equal(t.accepts[0].amount, amount, path);
+    assert.equal(t.accepts[0].payTo.toLowerCase(), MERCHANT);
+    assert.match(t.error, /invalid request body/);
+  }
+  const paid = await fetch(`${base}/agent/contract`, { method: "POST", headers: { ...h, "payment-signature": "e30=" }, body: JSON.stringify({ address: "string" }) });
+  assert.equal(paid.status, 400);
+  assert.equal(paid.headers.get("payment-required"), null, "no terms on a request that already pays");
+  const other = await fetch(`${base}/agent/jobs/not-a-job`, { headers: h });
+  assert.equal(other.headers.get("payment-required"), null, "only paid endpoints carry terms");
+});
