@@ -105,6 +105,8 @@ function send(res, code, body, extraHeaders = {}) {
     "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, payment-signature",
     "access-control-expose-headers": "payment-required, payment-response",
+    // A paid endpoint refusing an unpaid request as malformed still states its price.
+    ...(code === 400 && res.x402Terms ? { "payment-required": res.x402Terms } : {}),
     ...extraHeaders,
   });
   res.end(payload);
@@ -807,6 +809,17 @@ async function discoveryQuote(res, e) {
   }, headers);
 }
 
+// Crawlers fill the schema with placeholders ("programId": "string") and get a 400.
+// That 400 now carries the same terms as the 402, so they still see the price; the
+// status stays 400 so an agent knows its body is wrong. Nothing becomes payable:
+// input is validated before any payment is verified or settled.
+const INVALID_BODY = "invalid request body: its schema is in extensions.bazaar";
+async function attachTerms(res, e) {
+  if (!MERCHANT_WALLET || !facilitator) return;
+  try { res.x402Terms = encodeHeader(e.required(INVALID_BODY)); }
+  catch (err) { console.error(`[x402] terms for a 400 unavailable: ${err.message}`); }
+}
+
 function x402Discovery() {
   return {
     x402Version: 2,
@@ -971,6 +984,9 @@ const server = createServer(async (req, res) => {
       if (rateLimited(ip, 120)) return send(res, 429, { error: "rate limited" });
       return discoveryQuote(res, catalogEntry(url.pathname));
     }
+
+    if (req.method === "POST" && catalogEntry(url.pathname) && !req.headers["payment-signature"] && !req.headers["x-payment"])
+      await attachTerms(res, catalogEntry(url.pathname));
 
     if (req.method === "POST" && url.pathname === "/agent/scan") {
       if (!MERCHANT_WALLET) return send(res, 503, { error: "payments not configured" });
